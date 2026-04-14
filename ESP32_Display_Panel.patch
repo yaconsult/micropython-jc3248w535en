@@ -1,0 +1,2204 @@
+From d5957e4edb78585da521bdc852db8dd64e23626b Mon Sep 17 00:00:00 2001
+From: Leo Pinard <yaconsult@gmail.com>
+Date: Mon, 13 Apr 2026 23:47:28 -0700
+Subject: [PATCH] Add JC3248W535EN MicroPython support
+
+- Add BOARD_JC3248W535EN.h with vendor init sequence and 20MHz QSPI clock
+- Enable BOARD_JC3248W535EN in esp_panel_board_supported_conf.h
+- Enable only required drivers in esp_panel_drivers_conf.h (QSPI, I2C, AXS15231B)
+- Add draw_bitmap, get_width, get_height, read_touch to MicroPython wrapper
+  - draw_bitmap sends in 30-row chunks to avoid SPI DMA limits
+  - draw_bitmap byte-swaps RGB565 pixels for QSPI SPI_SWAP_DATA_TX
+  - read_touch returns list of (x, y, strength) tuples
+- Add CMakeLists.txt root to INCLUDE_DIRS for conf header discovery
+- Add MICROPYTHON_JC3248W535EN.md with full build/flash/usage guide
+---
+ CMakeLists.txt                                |   2 +-
+ MICROPYTHON_JC3248W535EN.md                   | 248 +++++++++++++++
+ esp_panel_board_supported_conf.h              |   3 +-
+ esp_panel_drivers_conf.h                      |  10 +-
+ mpy_support/esp_lcd_io_i2c.h                  | 122 +++++++
+ mpy_support/esp_lcd_io_i80.h                  | 119 +++++++
+ mpy_support/esp_lcd_io_spi.h                  |  61 ++++
+ mpy_support/esp_lcd_panel_commands.h          |  56 ++++
+ mpy_support/esp_lcd_panel_dev.h               |  37 +++
+ mpy_support/esp_lcd_panel_interface.h         | 139 ++++++++
+ mpy_support/esp_lcd_panel_io.h                |  98 ++++++
+ mpy_support/esp_lcd_panel_io_interface.h      |  93 ++++++
+ mpy_support/esp_lcd_panel_nt35510.h           |  31 ++
+ mpy_support/esp_lcd_panel_ops.h               | 149 +++++++++
+ mpy_support/esp_lcd_panel_rgb.h               | 301 ++++++++++++++++++
+ mpy_support/esp_lcd_panel_ssd1306.h           |  61 ++++
+ mpy_support/esp_lcd_panel_st7789.h            |  31 ++
+ mpy_support/esp_lcd_panel_vendor.h            |  12 +
+ mpy_support/esp_lcd_types.h                   |  96 ++++++
+ mpy_support/esp_panel_mp_board.cpp            |  90 ++++++
+ .../esp_panel_board_config_supported.h        |   3 +
+ .../supported/jingcai/BOARD_JC3248W535EN.h    | 188 +++++++++++
+ 22 files changed, 1943 insertions(+), 7 deletions(-)
+ create mode 100644 MICROPYTHON_JC3248W535EN.md
+ create mode 100644 mpy_support/esp_lcd_io_i2c.h
+ create mode 100644 mpy_support/esp_lcd_io_i80.h
+ create mode 100644 mpy_support/esp_lcd_io_spi.h
+ create mode 100644 mpy_support/esp_lcd_panel_commands.h
+ create mode 100644 mpy_support/esp_lcd_panel_dev.h
+ create mode 100644 mpy_support/esp_lcd_panel_interface.h
+ create mode 100644 mpy_support/esp_lcd_panel_io.h
+ create mode 100644 mpy_support/esp_lcd_panel_io_interface.h
+ create mode 100644 mpy_support/esp_lcd_panel_nt35510.h
+ create mode 100644 mpy_support/esp_lcd_panel_ops.h
+ create mode 100644 mpy_support/esp_lcd_panel_rgb.h
+ create mode 100644 mpy_support/esp_lcd_panel_ssd1306.h
+ create mode 100644 mpy_support/esp_lcd_panel_st7789.h
+ create mode 100644 mpy_support/esp_lcd_panel_vendor.h
+ create mode 100644 mpy_support/esp_lcd_types.h
+ create mode 100644 src/board/supported/jingcai/BOARD_JC3248W535EN.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9c30806..c32af69 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,7 +5,7 @@ file(GLOB_RECURSE C_SRCS "${SRCS_DIR}/*.c")
+ 
+ idf_component_register(
+     SRCS ${C_SRCS} ${CPP_SRCS}
+-    INCLUDE_DIRS ${SRCS_DIR}
++    INCLUDE_DIRS ${SRCS_DIR} .
+     REQUIRES driver esp_lcd
+ )
+ 
+diff --git a/MICROPYTHON_JC3248W535EN.md b/MICROPYTHON_JC3248W535EN.md
+new file mode 100644
+index 0000000..6da3a98
+--- /dev/null
++++ b/MICROPYTHON_JC3248W535EN.md
+@@ -0,0 +1,248 @@
++# MicroPython + ESP32_Display_Panel on the JC3248W535EN
++
++A complete guide to building custom MicroPython firmware for the
++**Jingcai JC3248W535EN** development board, integrating the
++`ESP32_Display_Panel` library for QSPI display and capacitive touch support.
++
++---
++
++## Hardware
++
++| Component | Details |
++|-----------|---------|
++| MCU | ESP32-S3, 16 MB flash, 8 MB Octal PSRAM |
++| Display | 3.2" 320×480 IPS, AXS15231B controller, QSPI |
++| Touch | AXS15231B capacitive touch, I2C |
++| USB | USB CDC (appears as `/dev/ttyACM0` on Linux) |
++
++### Pin assignments
++
++| Signal | GPIO |
++|--------|------|
++| QSPI SCK | 47 |
++| QSPI DATA0 | 21 |
++| QSPI DATA1 | 48 |
++| QSPI DATA2 | 40 |
++| QSPI DATA3 | 39 |
++| QSPI CS | 45 |
++| Touch SCL (I2C0) | 8 |
++| Touch SDA (I2C0) | 4 |
++| Touch I2C address | 0x3B |
++
++---
++
++## Repository layout
++
++```
++/home/lpinard/Repos/
++├── micropython/                 # MicroPython fork
++├── esp-idf/                     # ESP-IDF v5.4.2
++├── ESP32_Display_Panel/         # Espressif display/touch library (modified)
++├── esp-lib-utils/               # Dependency of ESP32_Display_Panel
++├── ESP32_IO_Expander/           # Dependency of ESP32_Display_Panel
++└── micropython_esp_panel.cmake  # USER_C_MODULES entry point
++```
++
++---
++
++## Build
++
++```bash
++source /home/lpinard/Repos/esp-idf/export.sh
++
++make BOARD=ESP32_GENERIC_S3 BOARD_VARIANT=SPIRAM_OCT \
++     USER_C_MODULES=/home/lpinard/Repos/micropython_esp_panel.cmake \
++     -C /home/lpinard/Repos/micropython/ports/esp32
++```
++
++Output binaries are in:
++`micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/`
++
++---
++
++## Flash
++
++Enter bootloader: hold **BOOT**, unplug USB, plug USB, release **BOOT**.
++
++```bash
++source /home/lpinard/Repos/esp-idf/export.sh
++
++BUILD=micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT
++
++python -m esptool --chip esp32s3 --port /dev/ttyACM0 -b 460800 \
++  --before no_reset --after hard_reset write_flash \
++  --flash_mode dio --flash_size 16MB --flash_freq 80m \
++  0x0     $BUILD/bootloader/bootloader.bin \
++  0x8000  $BUILD/partition_table/partition-table.bin \
++  0x10000 $BUILD/micropython.bin
++```
++
++> If the board is running MicroPython (not in bootloader), try
++> `--before default_reset` — it will attempt auto-reset via DTR/RTS.
++> This works most of the time but occasionally fails and requires manual
++> bootloader entry.
++
++---
++
++## MicroPython API
++
++```python
++from esp_panel import Board
++
++b = Board()
++b.init()   # returns True on success
++b.begin()  # returns True on success — initialises display + touch
++
++# Display info
++b.get_width()   # 320
++b.get_height()  # 480
++
++# Draw a solid red screen (RGB565, big-endian byte order)
++buf = bytearray([0xF8, 0x00] * (320 * 480))
++b.draw_bitmap(0, 0, 320, 480, buf)   # returns True
++
++# Draw a partial region  (x, y, width, height, buf)
++stripe = bytearray([0x07, 0xE0] * (320 * 30))   # green, 30 rows
++b.draw_bitmap(0, 100, 320, 30, stripe)
++
++# Color bar test (built-in)
++b.color_bar_test()   # returns True, draws 16 colour bars on screen
++
++# Touch — returns list of (x, y, strength) tuples; [] when not touching
++points = b.read_touch()
++# e.g. [(194, 300, 0)]  — strength is always 0 for AXS15231B
++
++b.deinit()
++```
++
++### RGB565 colour reference (big-endian)
++
++| Colour | Bytes |
++|--------|-------|
++| Red | `0xF8, 0x00` |
++| Green | `0x07, 0xE0` |
++| Blue | `0x00, 0x1F` |
++| White | `0xFF, 0xFF` |
++| Black | `0x00, 0x00` |
++| Yellow | `0xFF, 0xE0` |
++
++> **Important:** `draw_bitmap` expects standard RGB565 big-endian bytes.
++> The wrapper byte-swaps internally before sending over QSPI, so you do
++> **not** need to pre-swap.
++
++---
++
++## Key implementation decisions and hard-won lessons
++
++### 1. Vendor init sequence is mandatory
++
++The `ESP32_Display_Panel` library ships a default AXS15231B init sequence
++that includes command `0x22` (ALL_PIXELS_OFF). Using it results in a blank
++or corrupted display.
++
++The fix: `BOARD_JC3248W535EN.h` now defines
++`ESP_PANEL_BOARD_LCD_VENDOR_INIT_CMD()` with the full init sequence from
++the vendor's official Arduino demo (`esp_bsp.c`). This must end with
++`0x2C` (RAMWR) — not `0x29` (DISPLAY_ON).
++
++### 2. QSPI clock must be 20 MHz
++
++40 MHz (the library default) causes visible pixel noise because the QSPI
++signals pass through the ESP32-S3's GPIO matrix which introduces propagation
++delay. 20 MHz is stable.
++
++Set in `BOARD_JC3248W535EN.h`:
++```c
++#define ESP_PANEL_BOARD_LCD_QSPI_CLK_HZ  (20 * 1000 * 1000)
++```
++
++### 3. draw_bitmap must send in chunks
++
++A single `esp_lcd_panel_draw_bitmap` call with a 307 200-byte buffer
++(full 320×480 RGB565 frame) blocks indefinitely waiting for the SPI DMA
++completion semaphore. The driver only fires the `on_color_trans_done`
++callback once per queued transaction and the transaction size is limited.
++
++The wrapper sends 30 rows at a time (matching `colorBarTest` internally):
++```cpp
++int chunk_rows = 30;  // ~19 200 bytes per chunk at RGB565
++```
++
++### 4. QSPI byte order
++
++The AXS15231B QSPI driver applies `SPI_SWAP_DATA_TX` (bit reversal within
++the 16-bit word) to pixel data. The MicroPython wrapper compensates by
++byte-swapping each 16-bit pixel before handing it to `drawBitmap`, so
++callers can use standard big-endian RGB565.
++
++### 5. Do not use machine.I2C on touch pins
++
++`machine.I2C(0, scl=Pin(8), sda=Pin(4))` will conflict with the
++`ESP32_Display_Panel` touch driver which owns I2C bus 0. Using it before
++or after `b.begin()` leaves the bus in a state where `read_touch()` always
++returns `[]`. Reboot to recover.
++
++### 6. Configuration file skip flags
++
++The library checks Kconfig symbols `CONFIG_ESP_PANEL_BOARD_FILE_SKIP` and
++`CONFIG_ESP_PANEL_DRIVERS_FILE_SKIP`. If set (the Kconfig default when
++building outside the library's own project), the `.h` config files are
++ignored. Override in
++`boards/ESP32_GENERIC_S3/sdkconfig.esp_panel`:
++
++```
++CONFIG_ESP_PANEL_BOARD_FILE_SKIP=n
++CONFIG_ESP_PANEL_DRIVERS_FILE_SKIP=n
++CONFIG_ESP_UTILS_CONF_FILE_SKIP=n
++```
++
++### 7. Board header macro syntax
++
++`ESP_PANEL_BOARD_LCD_VENDOR_INIT_CMD()` is expanded as:
++```c
++static const esp_panel_lcd_vendor_init_cmd_t lcd_vendor_init_cmds[] =
++    ESP_PANEL_BOARD_LCD_VENDOR_INIT_CMD();
++```
++The macro must therefore expand to `{ {...}, {...}, ... }` — **outer braces
++included inside the macro**.
++
++---
++
++## Files modified
++
++### `ESP32_Display_Panel/` repo
++
++| File | Change |
++|------|--------|
++| `src/board/supported/jingcai/BOARD_JC3248W535EN.h` | QSPI clock → 20 MHz; added full vendor init sequence; touch pins SCL=8 SDA=4 |
++| `esp_panel_board_supported_conf.h` | Enabled `BOARD_JC3248W535EN` |
++| `CMakeLists.txt` | Added `.` to `INCLUDE_DIRS` so conf headers are found |
++| `mpy_support/esp_panel_mp_board.cpp` | Added `draw_bitmap`, `get_width`, `get_height`, `read_touch` methods |
++
++### `micropython/` repo
++
++| File | Change |
++|------|--------|
++| `ports/esp32/CMakeLists.txt` | Added `EXTRA_COMPONENT_DIRS` for ESP32_Display_Panel and dependencies |
++| `ports/esp32/esp32_common.cmake` | Appended `ESP32_Display_Panel`, `esp-lib-utils`, `ESP32_IO_Expander` to `IDF_COMPONENTS` |
++| `ports/esp32/main/idf_component.yml` | Listed dependencies |
++| `ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel` | FILE_SKIP overrides *(new file)* |
++| `ports/esp32/boards/ESP32_GENERIC_S3/mpconfigvariant_SPIRAM_OCT.cmake` | Added `sdkconfig.esp_panel` to `SDKCONFIG_DEFAULTS` |
++
++### `micropython_esp_panel.cmake` (standalone)
++
++USER_C_MODULES entry point — registers `mpy_support/` sources with
++MicroPython's build system.
++
++---
++
++## What remains to be done
++
++- [ ] **Backlight control** — PWM via LEDC on the backlight GPIO (check vendor schematic for pin)
++- [ ] **Remove `mp_printf` debug** — left in `draw_bitmap` temporarily; clean before release
++- [ ] **Expose `draw_bitmap` chunk size** — make it configurable or auto-detect max DMA size
++- [ ] **Multi-touch test** — `read_touch` supports up to 5 points; only single touch verified
++- [ ] **Framebuffer helper** — a Python-level `FrameBuffer`-compatible class using PSRAM
++- [ ] **main.py auto-init** — write a clean `main.py` to init display on boot
++- [ ] **Upstream contributions** — submit board header fixes and mpy_support additions back to ESP32_Display_Panel
++- [ ] **Test at 40 MHz with direct IOMUX** — if QSPI pins can be routed via IOMUX (bypassing GPIO matrix), 40 MHz may work
+diff --git a/esp_panel_board_supported_conf.h b/esp_panel_board_supported_conf.h
+index 0d10186..999551f 100644
+--- a/esp_panel_board_supported_conf.h
++++ b/esp_panel_board_supported_conf.h
+@@ -18,7 +18,7 @@
+  *
+  * Set to `1` to enable supported board configuration, `0` to disable
+  */
+-#define ESP_PANEL_BOARD_DEFAULT_USE_SUPPORTED       (0)
++#define ESP_PANEL_BOARD_DEFAULT_USE_SUPPORTED       (1)
+ 
+ #if ESP_PANEL_BOARD_DEFAULT_USE_SUPPORTED
+ /**
+@@ -88,6 +88,7 @@
+  */
+ // #define BOARD_JINGCAI_ESP32_4848S040C_I_Y_3
+ // #define BOARD_JINGCAI_JC8048W550C
++#define BOARD_JC3248W535EN
+ 
+ /*
+  * Waveshare Supported Boards (https://www.waveshare.com/):
+diff --git a/esp_panel_drivers_conf.h b/esp_panel_drivers_conf.h
+index 666b254..8f2f89c 100644
+--- a/esp_panel_drivers_conf.h
++++ b/esp_panel_drivers_conf.h
+@@ -24,12 +24,12 @@
+  * Enable or disable bus drivers used in the factory class. Disable to reduce code size.
+  * Set to `1` to enable, `0` to disable.
+  */
+-#define ESP_PANEL_DRIVERS_BUS_USE_ALL                   (1)
++#define ESP_PANEL_DRIVERS_BUS_USE_ALL                   (0)
+ #if !ESP_PANEL_DRIVERS_BUS_USE_ALL
+     #define ESP_PANEL_DRIVERS_BUS_USE_SPI               (0)
+-    #define ESP_PANEL_DRIVERS_BUS_USE_QSPI              (0)
++    #define ESP_PANEL_DRIVERS_BUS_USE_QSPI              (1)
+     #define ESP_PANEL_DRIVERS_BUS_USE_RGB               (0)
+-    #define ESP_PANEL_DRIVERS_BUS_USE_I2C               (0)
++    #define ESP_PANEL_DRIVERS_BUS_USE_I2C               (1)
+     #define ESP_PANEL_DRIVERS_BUS_USE_MIPI_DSI          (0)
+ #endif // ESP_PANEL_DRIVERS_BUS_USE_ALL
+ 
+@@ -63,7 +63,7 @@
+  */
+ #define ESP_PANEL_DRIVERS_LCD_USE_ALL                   (0)
+ #if !ESP_PANEL_DRIVERS_LCD_USE_ALL
+-    #define ESP_PANEL_DRIVERS_LCD_USE_AXS15231B         (0)
++    #define ESP_PANEL_DRIVERS_LCD_USE_AXS15231B         (1)
+     #define ESP_PANEL_DRIVERS_LCD_USE_EK9716B           (0)
+     #define ESP_PANEL_DRIVERS_LCD_USE_EK79007           (0)
+     #define ESP_PANEL_DRIVERS_LCD_USE_GC9A01            (0)
+@@ -123,7 +123,7 @@
+  */
+ #define ESP_PANEL_DRIVERS_TOUCH_USE_ALL                 (0)
+ #if !ESP_PANEL_DRIVERS_TOUCH_USE_ALL
+-    #define ESP_PANEL_DRIVERS_TOUCH_USE_AXS15231B       (0)
++    #define ESP_PANEL_DRIVERS_TOUCH_USE_AXS15231B       (1)
+     #define ESP_PANEL_DRIVERS_TOUCH_USE_CHSC6540        (0)
+     #define ESP_PANEL_DRIVERS_TOUCH_USE_CST816S         (0)
+     #define ESP_PANEL_DRIVERS_TOUCH_USE_CST820          (0)
+diff --git a/mpy_support/esp_lcd_io_i2c.h b/mpy_support/esp_lcd_io_i2c.h
+new file mode 100644
+index 0000000..e98f18a
+--- /dev/null
++++ b/mpy_support/esp_lcd_io_i2c.h
+@@ -0,0 +1,122 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++#include "driver/i2c_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef uint32_t esp_lcd_i2c_bus_handle_t;                    /*!< Type of LCD I2C bus handle */
++
++/**
++ * @brief Panel IO configuration structure, for I2C interface
++ *
++ */
++typedef struct {
++    uint32_t dev_addr; /*!< I2C device address */
++    esp_lcd_panel_io_color_trans_done_cb_t on_color_trans_done; /*!< Callback invoked when color data transfer has finished */
++    void *user_ctx; /*!< User private data, passed directly to on_color_trans_done's user_ctx */
++    size_t control_phase_bytes; /*!< I2C LCD panel will encode control information (e.g. D/C selection) into control phase, in several bytes */
++    unsigned int dc_bit_offset; /*!< Offset of the D/C selection bit in control phase */
++    int lcd_cmd_bits;           /*!< Bit-width of LCD command */
++    int lcd_param_bits;         /*!< Bit-width of LCD parameter */
++    struct {
++        unsigned int dc_low_on_data: 1;  /*!< If this flag is enabled, DC line = 0 means transfer data, DC line = 1 means transfer command; vice versa */
++        unsigned int disable_control_phase: 1; /*!< If this flag is enabled, the control phase isn't used */
++    } flags; /*!< Extra flags to fine-tune the I2C device */
++    uint32_t scl_speed_hz; /*!< I2C LCD SCL frequency (hz) */
++} esp_lcd_panel_io_i2c_config_t;
++
++/**
++ * @brief Create LCD panel IO handle, for I2C interface in legacy implementation
++ *
++ * @param[in] bus I2C bus handle, (in uint32_t)
++ * @param[in] io_config IO configuration, for I2C interface
++ * @param[out] ret_io Returned IO handle
++ *
++ * @note Please don't call this function in your project directly. Please call `esp_lcd_new_panel_to_i2c` instead.
++ *
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_new_panel_io_i2c_v1(uint32_t bus, const esp_lcd_panel_io_i2c_config_t *io_config, esp_lcd_panel_io_handle_t *ret_io);
++
++/**
++ * @brief Create LCD panel IO handle, for I2C interface in new implementation
++ *
++ * @param[in] bus I2C bus handle, (in i2c_master_dev_handle_t)
++ * @param[in] io_config IO configuration, for I2C interface
++ * @param[out] ret_io Returned IO handle
++ *
++ * @note Please don't call this function in your project directly. Please call `esp_lcd_new_panel_to_i2c` instead.
++ *
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_new_panel_io_i2c_v2(i2c_master_bus_handle_t bus, const esp_lcd_panel_io_i2c_config_t *io_config, esp_lcd_panel_io_handle_t *ret_io);
++
++#ifdef __cplusplus
++}
++#endif
++
++#ifdef __cplusplus
++/**
++ * @brief Create LCD panel IO handle
++ *
++ * @param[in] bus I2C bus ID, indicates which I2C port to use
++ * @param[in] io_config IO configuration, for I2C interface
++ * @param[out] ret_io Returned IO handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++static inline esp_err_t esp_lcd_new_panel_io_i2c(uint32_t bus, const esp_lcd_panel_io_i2c_config_t *io_config, esp_lcd_panel_io_handle_t *ret_io)
++{
++    return esp_lcd_new_panel_io_i2c_v1(bus, io_config, ret_io);
++}
++
++/**
++ * @brief Create LCD panel IO handle
++ *
++ * @param[in] bus I2C bus handle, returned from `i2c_new_master_bus`
++ * @param[in] io_config IO configuration, for I2C interface
++ * @param[out] ret_io Returned IO handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++static inline esp_err_t esp_lcd_new_panel_io_i2c(i2c_master_bus_handle_t bus, const esp_lcd_panel_io_i2c_config_t *io_config, esp_lcd_panel_io_handle_t *ret_io)
++{
++    return esp_lcd_new_panel_io_i2c_v2(bus, io_config, ret_io);
++}
++#else
++/**
++ * @brief Create LCD panel IO handle
++ *
++ * @param[in] bus I2C bus handle
++ * @param[in] io_config IO configuration, for I2C interface
++ * @param[out] ret_io Returned IO handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++#define esp_lcd_new_panel_io_i2c(bus, io_config, ret_io) _Generic((bus),  \
++            i2c_master_bus_handle_t : esp_lcd_new_panel_io_i2c_v2, \
++            default : esp_lcd_new_panel_io_i2c_v1) (bus, io_config, ret_io)
++
++#endif
+diff --git a/mpy_support/esp_lcd_io_i80.h b/mpy_support/esp_lcd_io_i80.h
+new file mode 100644
+index 0000000..f288539
+--- /dev/null
++++ b/mpy_support/esp_lcd_io_i80.h
+@@ -0,0 +1,119 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++#include "soc/soc_caps.h"
++
++#define ESP_LCD_I80_BUS_WIDTH_MAX 16 /*!< Maximum width of I80 bus */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct esp_lcd_i80_bus_t *esp_lcd_i80_bus_handle_t;   /*!< Type of LCD intel 8080 bus handle */
++
++#if SOC_LCD_I80_SUPPORTED
++/**
++ * @brief LCD Intel 8080 bus configuration structure
++ */
++typedef struct {
++    int dc_gpio_num; /*!< GPIO used for D/C line */
++    int wr_gpio_num; /*!< GPIO used for WR line */
++    lcd_clock_source_t clk_src; /*!< Clock source for the I80 LCD peripheral */
++    int data_gpio_nums[ESP_LCD_I80_BUS_WIDTH_MAX]; /*!< GPIOs used for data lines */
++    size_t bus_width;          /*!< Number of data lines, 8 or 16 */
++    size_t max_transfer_bytes; /*!< Maximum transfer size, this determines the length of internal DMA link */
++    union {
++        size_t psram_trans_align __attribute__((deprecated)); /*!< DMA transfer alignment for data allocated from PSRAM */
++        size_t dma_burst_size;     /*!< DMA burst size, in bytes */
++    };
++    size_t sram_trans_align __attribute__((deprecated)); /*!< DMA transfer alignment for data allocated from SRAM */
++} esp_lcd_i80_bus_config_t;
++
++/**
++ * @brief Create Intel 8080 bus handle
++ *
++ * @param[in] bus_config Bus configuration
++ * @param[out] ret_bus Returned bus handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_ERR_NOT_FOUND     if no free bus is available
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_new_i80_bus(const esp_lcd_i80_bus_config_t *bus_config, esp_lcd_i80_bus_handle_t *ret_bus);
++
++/**
++ * @brief Destroy Intel 8080 bus handle
++ *
++ * @param[in] bus Intel 8080 bus handle, created by `esp_lcd_new_i80_bus()`
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_INVALID_STATE if there still be some device attached to the bus
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_del_i80_bus(esp_lcd_i80_bus_handle_t bus);
++
++/**
++ * @brief Panel IO configuration structure, for intel 8080 interface
++ */
++typedef struct {
++    int cs_gpio_num;         /*!< GPIO used for CS line, set to -1 will declaim exclusively use of I80 bus */
++    uint32_t pclk_hz;        /*!< Frequency of pixel clock */
++    size_t trans_queue_depth; /*!< Transaction queue size, larger queue, higher throughput */
++    esp_lcd_panel_io_color_trans_done_cb_t on_color_trans_done; /*!< Callback invoked when color data was transferred done */
++    void *user_ctx;    /*!< User private data, passed directly to on_color_trans_done's user_ctx */
++    int lcd_cmd_bits;   /*!< Bit-width of LCD command */
++    int lcd_param_bits; /*!< Bit-width of LCD parameter */
++    struct {
++        unsigned int dc_idle_level: 1;  /*!< Level of DC line in IDLE phase */
++        unsigned int dc_cmd_level: 1;   /*!< Level of DC line in CMD phase */
++        unsigned int dc_dummy_level: 1; /*!< Level of DC line in DUMMY phase */
++        unsigned int dc_data_level: 1;  /*!< Level of DC line in DATA phase */
++    } dc_levels; /*!< Each i80 device might have its own D/C control logic */
++    struct {
++        unsigned int cs_active_high: 1;     /*!< If set, a high level of CS line will select the device, otherwise, CS line is low level active */
++        unsigned int reverse_color_bits: 1; /*!< Reverse the data bits, D[N:0] -> D[0:N] */
++        unsigned int swap_color_bytes: 1;   /*!< Swap adjacent two color bytes */
++        unsigned int pclk_active_neg: 1;    /*!< The display will write data lines when there's a falling edge on WR signal (a.k.a the PCLK) */
++        unsigned int pclk_idle_low: 1;      /*!< The WR signal (a.k.a the PCLK) stays at low level in IDLE phase */
++    } flags;                                /*!< Panel IO config flags */
++} esp_lcd_panel_io_i80_config_t;
++
++/**
++ * @brief Create LCD panel IO, for Intel 8080 interface
++ *
++ * @param[in] bus Intel 8080 bus handle, created by `esp_lcd_new_i80_bus()`
++ * @param[in] io_config IO configuration, for i80 interface
++ * @param[out] ret_io Returned panel IO handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NOT_SUPPORTED if some configuration can't be satisfied, e.g. pixel clock out of the range
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_new_panel_io_i80(esp_lcd_i80_bus_handle_t bus, const esp_lcd_panel_io_i80_config_t *io_config, esp_lcd_panel_io_handle_t *ret_io);
++
++/**
++ * @brief Allocate a draw buffer that can be used by I80 interfaced LCD panel
++ *
++ * @note This function differs from the normal 'heap_caps_*' functions in that it can also automatically handle the alignment required by DMA burst, cache line size, etc.
++ *
++ * @param[in] io Panel IO handle, created by `esp_lcd_new_panel_io_i80()`
++ * @param[in] size Size of memory to be allocated
++ * @param[in] caps Bitwise OR of MALLOC_CAP_* flags indicating the type of memory desired for the allocation
++ * @return Pointer to a new buffer of size 'size' with capabilities 'caps', or NULL if allocation failed
++ */
++void *esp_lcd_i80_alloc_draw_buffer(esp_lcd_panel_io_handle_t io, size_t size, uint32_t caps);
++
++#endif // SOC_LCD_I80_SUPPORTED
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_io_spi.h b/mpy_support/esp_lcd_io_spi.h
+new file mode 100644
+index 0000000..6781c6a
+--- /dev/null
++++ b/mpy_support/esp_lcd_io_spi.h
+@@ -0,0 +1,61 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++#include "driver/spi_master.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef int esp_lcd_spi_bus_handle_t;  /*!< Type of LCD SPI bus handle */
++
++/**
++ * @brief Panel IO configuration structure, for SPI interface
++ */
++typedef struct {
++    int cs_gpio_num; /*!< GPIO used for CS line */
++    int dc_gpio_num; /*!< GPIO used to select the D/C line, set this to -1 if the D/C line is not used */
++    int spi_mode;    /*!< Traditional SPI mode (0~3) */
++    unsigned int pclk_hz;    /*!< Frequency of pixel clock */
++    size_t trans_queue_depth; /*!< Size of internal transaction queue */
++    esp_lcd_panel_io_color_trans_done_cb_t on_color_trans_done; /*!< Callback invoked when color data transfer has finished */
++    void *user_ctx;    /*!< User private data, passed directly to on_color_trans_done's user_ctx */
++    int lcd_cmd_bits;   /*!< Bit-width of LCD command */
++    int lcd_param_bits; /*!< Bit-width of LCD parameter */
++    uint8_t cs_ena_pretrans;        /*!< Amount of SPI bit-cycles the cs should be activated before the transmission (0-16) */
++    uint8_t cs_ena_posttrans;       /*!< Amount of SPI bit-cycles the cs should stay active after the transmission (0-16) */
++    struct {
++        unsigned int dc_high_on_cmd: 1;  /*!< If enabled, DC level = 1 indicates command transfer */
++        unsigned int dc_low_on_data: 1;  /*!< If enabled, DC level = 0 indicates color data transfer */
++        unsigned int dc_low_on_param: 1; /*!< If enabled, DC level = 0 indicates parameter transfer */
++        unsigned int octal_mode: 1;      /*!< transmit with octal mode (8 data lines), this mode is used to simulate Intel 8080 timing */
++        unsigned int quad_mode: 1;       /*!< transmit with quad mode (4 data lines), this mode is useful when transmitting LCD parameters (Only use one line for command) */
++        unsigned int sio_mode: 1;        /*!< Read and write through a single data line (MOSI) */
++        unsigned int lsb_first: 1;       /*!< transmit LSB bit first */
++        unsigned int cs_high_active: 1;  /*!< CS line is high active */
++    } flags; /*!< Extra flags to fine-tune the SPI device */
++} esp_lcd_panel_io_spi_config_t;
++
++/**
++ * @brief Create LCD panel IO handle, for SPI interface
++ *
++ * @param[in] bus SPI bus handle
++ * @param[in] io_config IO configuration, for SPI interface
++ * @param[out] ret_io Returned IO handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_new_panel_io_spi(esp_lcd_spi_bus_handle_t bus, const esp_lcd_panel_io_spi_config_t *io_config, esp_lcd_panel_io_handle_t *ret_io);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_commands.h b/mpy_support/esp_lcd_panel_commands.h
+new file mode 100644
+index 0000000..67129aa
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_commands.h
+@@ -0,0 +1,56 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++/* Common LCD panel commands */
++#define LCD_CMD_NOP          0x00 // This command is empty command
++#define LCD_CMD_SWRESET      0x01 // Software reset registers (the built-in frame buffer is not affected)
++#define LCD_CMD_RDDID        0x04 // Read 24-bit display ID
++#define LCD_CMD_RDDST        0x09 // Read display status
++#define LCD_CMD_RDDPM        0x0A // Read display power mode
++#define LCD_CMD_RDD_MADCTL   0x0B // Read display MADCTL
++#define LCD_CMD_RDD_COLMOD   0x0C // Read display pixel format
++#define LCD_CMD_RDDIM        0x0D // Read display image mode
++#define LCD_CMD_RDDSM        0x0E // Read display signal mode
++#define LCD_CMD_RDDSR        0x0F // Read display self-diagnostic result
++#define LCD_CMD_SLPIN        0x10 // Go into sleep mode (DC/DC, oscillator, scanning stopped, but memory keeps content)
++#define LCD_CMD_SLPOUT       0x11 // Exit sleep mode
++#define LCD_CMD_PTLON        0x12 // Turns on partial display mode
++#define LCD_CMD_NORON        0x13 // Turns on normal display mode
++#define LCD_CMD_INVOFF       0x20 // Recover from display inversion mode
++#define LCD_CMD_INVON        0x21 // Go into display inversion mode
++#define LCD_CMD_GAMSET       0x26 // Select Gamma curve for current display
++#define LCD_CMD_DISPOFF      0x28 // Display off (disable frame buffer output)
++#define LCD_CMD_DISPON       0x29 // Display on (enable frame buffer output)
++#define LCD_CMD_CASET        0x2A // Set column address
++#define LCD_CMD_RASET        0x2B // Set row address
++#define LCD_CMD_RAMWR        0x2C // Write frame memory
++#define LCD_CMD_RAMRD        0x2E // Read frame memory
++#define LCD_CMD_PTLAR        0x30 // Define the partial area
++#define LCD_CMD_VSCRDEF      0x33 // Vertical scrolling definition
++#define LCD_CMD_TEOFF        0x34 // Turns off tearing effect
++#define LCD_CMD_TEON         0x35 // Turns on tearing effect
++#define LCD_CMD_MADCTL       0x36 // Memory data access control
++#define LCD_CMD_VSCSAD       0x37 // Vertical scroll start address
++#define LCD_CMD_IDMOFF       0x38 // Recover from IDLE mode
++#define LCD_CMD_IDMON        0x39 // Fall into IDLE mode (8 color depth is displayed)
++#define LCD_CMD_COLMOD       0x3A // Defines the format of RGB picture data
++#define LCD_CMD_RAMWRC       0x3C // Memory write continue
++#define LCD_CMD_RAMRDC       0x3E // Memory read continue
++#define LCD_CMD_STE          0x44 // Set tear scan line, tearing effect output signal when display module reaches line N
++#define LCD_CMD_GDCAN        0x45 // Get scan line
++#define LCD_CMD_WRDISBV      0x51 // Write display brightness
++#define LCD_CMD_RDDISBV      0x52 // Read display brightness value
++
++/////////// Warning, It turns out that, the following bitmask is not defined as a standard, some manufacturer may use different bit position
++/////////// Please check the datasheet of your LCD panel before using the following bitmask
++/////////// IDF will remove them in the next major release (esp-idf 6.0)
++#define LCD_CMD_MH_BIT       (1 << 2) // Display data latch order, 0: refresh left to right, 1: refresh right to left
++#define LCD_CMD_BGR_BIT      (1 << 3) // RGB/BGR order, 0: RGB, 1: BGR
++#define LCD_CMD_ML_BIT       (1 << 4) // Line address order, 0: refresh top to bottom, 1: refresh bottom to top
++#define LCD_CMD_MV_BIT       (1 << 5) // Row/Column order, 0: normal mode, 1: reverse mode
++#define LCD_CMD_MX_BIT       (1 << 6) // Column address order, 0: left to right, 1: right to left
++#define LCD_CMD_MY_BIT       (1 << 7) // Row address order, 0: top to bottom, 1: bottom to top
+diff --git a/mpy_support/esp_lcd_panel_dev.h b/mpy_support/esp_lcd_panel_dev.h
+new file mode 100644
+index 0000000..f39bdf2
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_dev.h
+@@ -0,0 +1,37 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Configuration structure for panel device
++ */
++typedef struct {
++    int reset_gpio_num; /*!< GPIO used to reset the LCD panel, set to -1 if it's not used */
++    union {
++        esp_lcd_color_space_t color_space;   /*!< @deprecated Set RGB color space, please use rgb_ele_order instead */
++        lcd_color_rgb_endian_t rgb_endian;   /*!< @deprecated Set RGB data endian, please use rgb_ele_order instead */
++        lcd_rgb_element_order_t rgb_ele_order; /*!< Set RGB element order, RGB or BGR */
++    };
++    lcd_rgb_data_endian_t data_endian;         /*!< Set the data endian for color data larger than 1 byte */
++    uint32_t bits_per_pixel;                   /*!< Color depth, in bpp */
++    struct {
++        uint32_t reset_active_high: 1; /*!< Setting this if the panel reset is high level active */
++    } flags;                           /*!< LCD panel config flags */
++    void *vendor_config; /*!< vendor specific configuration, optional, left as NULL if not used */
++} esp_lcd_panel_dev_config_t;
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_interface.h b/mpy_support/esp_lcd_panel_interface.h
+new file mode 100644
+index 0000000..bbcbdcb
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_interface.h
+@@ -0,0 +1,139 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct esp_lcd_panel_t esp_lcd_panel_t;  /*!< Type of LCD panel */
++
++/**
++ * @brief LCD panel interface
++ */
++struct esp_lcd_panel_t {
++    /**
++     * @brief Reset LCD panel
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @return
++     *          - ESP_OK on success
++     */
++    esp_err_t (*reset)(esp_lcd_panel_t *panel);
++
++    /**
++     * @brief Initialize LCD panel
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @return
++     *          - ESP_OK on success
++     */
++    esp_err_t (*init)(esp_lcd_panel_t *panel);
++
++    /**
++     * @brief Destroy LCD panel
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @return
++     *          - ESP_OK on success
++     */
++    esp_err_t (*del)(esp_lcd_panel_t *panel);
++
++    /**
++     * @brief Draw bitmap on LCD panel
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @param[in] x_start Start pixel index in the target frame buffer, on x-axis (x_start is included)
++     * @param[in] y_start Start pixel index in the target frame buffer, on y-axis (y_start is included)
++     * @param[in] x_end End pixel index in the target frame buffer, on x-axis (x_end is not included)
++     * @param[in] y_end End pixel index in the target frame buffer, on y-axis (y_end is not included)
++     * @param[in] color_data RGB color data that will be dumped to the specific window range
++     * @return
++     *          - ESP_OK on success
++     */
++    esp_err_t (*draw_bitmap)(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data);
++
++    /**
++     * @brief Mirror the LCD panel on specific axis
++     *
++     * @note Combine this function with `swap_xy`, one can realize screen rotatation
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @param[in] x_axis Whether the panel will be mirrored about the x_axis
++     * @param[in] y_axis Whether the panel will be mirrored about the y_axis
++     * @return
++     *          - ESP_OK on success
++     *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++     */
++    esp_err_t (*mirror)(esp_lcd_panel_t *panel, bool x_axis, bool y_axis);
++
++    /**
++     * @brief Swap/Exchange x and y axis
++     *
++     * @note Combine this function with `mirror`, one can realize screen rotatation
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @param[in] swap_axes Whether to swap the x and y axis
++     * @return
++     *          - ESP_OK on success
++     *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++     */
++    esp_err_t (*swap_xy)(esp_lcd_panel_t *panel, bool swap_axes);
++
++    /**
++     * @brief Set extra gap in x and y axis
++     *
++     * @note The gap is only used for calculating the real coordinates.
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @param[in] x_gap Extra gap on x axis, in pixels
++     * @param[in] y_gap Extra gap on y axis, in pixels
++     * @return
++     *          - ESP_OK on success
++     */
++    esp_err_t (*set_gap)(esp_lcd_panel_t *panel, int x_gap, int y_gap);
++
++    /**
++     * @brief Invert the color (bit 1 -> 0 for color data line, and vice versa)
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @param[in] invert_color_data Whether to invert the color data
++     * @return
++     *          - ESP_OK on success
++     */
++    esp_err_t (*invert_color)(esp_lcd_panel_t *panel, bool invert_color_data);
++
++    /**
++     * @brief Turn on or off the display
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @param[in] on_off True to turns on display, False to turns off display
++     * @return
++     *          - ESP_OK on success
++     *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++     */
++    esp_err_t (*disp_on_off)(esp_lcd_panel_t *panel, bool on_off);
++
++    /**
++     * @brief Enter or exit sleep mode
++     *
++     * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++     * @param[in] sleep True to enter sleep mode, False to wake up
++     * @return
++     *          - ESP_OK on success
++     *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++     */
++    esp_err_t (*disp_sleep)(esp_lcd_panel_t *panel, bool sleep);
++
++    void *user_data;    /*!< User data, used to store externally customized data */
++};
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_io.h b/mpy_support/esp_lcd_panel_io.h
+new file mode 100644
+index 0000000..ee2707f
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_io.h
+@@ -0,0 +1,98 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++#include "esp_lcd_io_i80.h"
++#include "esp_lcd_io_i2c.h"
++#include "esp_lcd_io_spi.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Transmit LCD command and receive corresponding parameters
++ *
++ * @note Commands sent by this function are short, so they are sent using polling transactions.
++ *       The function does not return before the command transfer is completed.
++ *       If any queued transactions sent by `esp_lcd_panel_io_tx_color()` are still pending when this function is called,
++ *       this function will wait until they are finished and the queue is empty before sending the command(s).
++ *
++ * @param[in]  io LCD panel IO handle, which is created by other factory API like `esp_lcd_new_panel_io_spi()`
++ * @param[in]  lcd_cmd The specific LCD command, set to -1 if no command needed
++ * @param[out] param Buffer for the command data
++ * @param[in]  param_size Size of `param` buffer
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NOT_SUPPORTED if read is not supported by transport
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_panel_io_rx_param(esp_lcd_panel_io_handle_t io, int lcd_cmd, void *param, size_t param_size);
++
++/**
++ * @brief Transmit LCD command and corresponding parameters
++ *
++ * @note Commands sent by this function are short, so they are sent using polling transactions.
++ *       The function does not return before the command transfer is completed.
++ *       If any queued transactions sent by `esp_lcd_panel_io_tx_color()` are still pending when this function is called,
++ *       this function will wait until they are finished and the queue is empty before sending the command(s).
++ *
++ * @param[in] io LCD panel IO handle, which is created by other factory API like `esp_lcd_new_panel_io_spi()`
++ * @param[in] lcd_cmd The specific LCD command, set to -1 if no command needed
++ * @param[in] param Buffer that holds the command specific parameters, set to NULL if no parameter is needed for the command
++ * @param[in] param_size Size of `param` in memory, in bytes, set to zero if no parameter is needed for the command
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_panel_io_tx_param(esp_lcd_panel_io_handle_t io, int lcd_cmd, const void *param, size_t param_size);
++
++/**
++ * @brief Transmit LCD RGB data
++ *
++ * @note This function will package the command and RGB data into a transaction, and push into a queue.
++ *       The real transmission is performed in the background (DMA+interrupt).
++ *       The caller should take care of the lifecycle of the `color` buffer.
++ *       Recycling of color buffer should be done in the callback `on_color_trans_done()`.
++ *
++ * @param[in] io LCD panel IO handle, which is created by factory API like `esp_lcd_new_panel_io_spi()`
++ * @param[in] lcd_cmd The specific LCD command, set to -1 if no command needed
++ * @param[in] color Buffer that holds the RGB color data
++ * @param[in] color_size Size of `color` in memory, in bytes
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_panel_io_tx_color(esp_lcd_panel_io_handle_t io, int lcd_cmd, const void *color, size_t color_size);
++
++/**
++ * @brief Destroy LCD panel IO handle (deinitialize panel and free all corresponding resource)
++ *
++ * @param[in] io LCD panel IO handle, which is created by factory API like `esp_lcd_new_panel_io_spi()`
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_panel_io_del(esp_lcd_panel_io_handle_t io);
++
++/**
++ * @brief Register LCD panel IO callbacks
++ *
++ * @param[in] io LCD panel IO handle, which is created by factory API like `esp_lcd_new_panel_io_spi()`
++ * @param[in] cbs structure with all LCD panel IO callbacks
++ * @param[in] user_ctx User private data, passed directly to callback's user_ctx
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_panel_io_register_event_callbacks(esp_lcd_panel_io_handle_t io, const esp_lcd_panel_io_callbacks_t *cbs, void *user_ctx);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_io_interface.h b/mpy_support/esp_lcd_panel_io_interface.h
+new file mode 100644
+index 0000000..0a4334f
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_io_interface.h
+@@ -0,0 +1,93 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct esp_lcd_panel_io_t esp_lcd_panel_io_t; /*!< Type of LCD panel IO */
++
++/**
++ * @brief LCD panel IO interface
++ */
++struct esp_lcd_panel_io_t {
++    /**
++     * @brief Transmit LCD command and receive corresponding parameters
++     *
++     * @note This is the panel-specific interface called by function `esp_lcd_panel_io_rx_param()`.
++     *
++     * @param[in]  io LCD panel IO handle, which is created by other factory API like `esp_lcd_new_panel_io_spi()`
++     * @param[in]  lcd_cmd The specific LCD command, set to -1 if no command needed
++     * @param[out] param Buffer for the command data
++     * @param[in]  param_size Size of `param` buffer
++     * @return
++     *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++     *          - ESP_ERR_NOT_SUPPORTED if read is not supported by transport
++     *          - ESP_OK                on success
++     */
++    esp_err_t (*rx_param)(esp_lcd_panel_io_t *io, int lcd_cmd, void *param, size_t param_size);
++
++    /**
++     * @brief Transmit LCD command and corresponding parameters
++     *
++     * @note This is the panel-specific interface called by function `esp_lcd_panel_io_tx_param()`.
++     *
++     * @param[in] io LCD panel IO handle, which is created by other factory API like `esp_lcd_new_panel_io_spi()`
++     * @param[in] lcd_cmd The specific LCD command
++     * @param[in] param Buffer that holds the command specific parameters, set to NULL if no parameter is needed for the command
++     * @param[in] param_size Size of `param` in memory, in bytes, set to zero if no parameter is needed for the command
++     * @return
++     *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++     *          - ESP_OK                on success
++     */
++    esp_err_t (*tx_param)(esp_lcd_panel_io_t *io, int lcd_cmd, const void *param, size_t param_size);
++
++    /**
++     * @brief Transmit LCD RGB data
++     *
++     * @note This is the panel-specific interface called by function `esp_lcd_panel_io_tx_color()`.
++     *
++     * @param[in] io LCD panel IO handle, which is created by other factory API like `esp_lcd_new_panel_io_spi()`
++     * @param[in] lcd_cmd The specific LCD command
++     * @param[in] color Buffer that holds the RGB color data
++     * @param[in] color_size Size of `color` in memory, in bytes
++     * @return
++     *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++     *          - ESP_OK                on success
++     */
++    esp_err_t (*tx_color)(esp_lcd_panel_io_t *io, int lcd_cmd, const void *color, size_t color_size);
++
++    /**
++     * @brief Destroy LCD panel IO handle (deinitialize all and free resource)
++     *
++     * @param[in] io LCD panel IO handle, which is created by other factory API like `esp_lcd_new_panel_io_spi()`
++     * @return
++     *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++     *          - ESP_OK                on success
++     */
++    esp_err_t (*del)(esp_lcd_panel_io_t *io);
++
++    /**
++     * @brief Register LCD panel IO callbacks
++     *
++     * @param[in] io LCD panel IO handle, which is created by factory API like `esp_lcd_new_panel_io_spi()`
++     * @param[in] cbs structure with all LCD panel IO callbacks
++     * @param[in] user_ctx User private data, passed directly to callback's user_ctx
++     * @return
++     *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++     *          - ESP_OK                on success
++     */
++    esp_err_t (*register_event_callbacks)(esp_lcd_panel_io_t *io, const esp_lcd_panel_io_callbacks_t *cbs, void *user_ctx);
++};
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_nt35510.h b/mpy_support/esp_lcd_panel_nt35510.h
+new file mode 100644
+index 0000000..627528f
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_nt35510.h
+@@ -0,0 +1,31 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_panel_dev.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Create LCD panel for model NT35510
++ *
++ * @param[in] io LCD panel IO handle
++ * @param[in] panel_dev_config general panel device configuration
++ * @param[out] ret_panel Returned LCD panel handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_new_panel_nt35510(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel_dev_config_t *panel_dev_config, esp_lcd_panel_handle_t *ret_panel);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_ops.h b/mpy_support/esp_lcd_panel_ops.h
+new file mode 100644
+index 0000000..47e22c7
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_ops.h
+@@ -0,0 +1,149 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Reset LCD panel
++ *
++ * @note Panel reset must be called before attempting to initialize the panel using `esp_lcd_panel_init()`.
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @return
++ *          - ESP_OK on success
++ */
++esp_err_t esp_lcd_panel_reset(esp_lcd_panel_handle_t panel);
++
++/**
++ * @brief Initialize LCD panel
++ *
++ * @note Before calling this function, make sure the LCD panel has finished the `reset` stage by `esp_lcd_panel_reset()`.
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @return
++ *          - ESP_OK on success
++ */
++esp_err_t esp_lcd_panel_init(esp_lcd_panel_handle_t panel);
++
++/**
++ * @brief Deinitialize the LCD panel
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @return
++ *          - ESP_OK on success
++ */
++esp_err_t esp_lcd_panel_del(esp_lcd_panel_handle_t panel);
++
++/**
++ * @brief Draw bitmap on LCD panel
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] x_start Start pixel index in the target frame buffer, on x-axis (x_start is included)
++ * @param[in] y_start Start pixel index in the target frame buffer, on y-axis (y_start is included)
++ * @param[in] x_end End pixel index in the target frame buffer, on x-axis (x_end is not included)
++ * @param[in] y_end End pixel index in the target frame buffer, on y-axis (y_end is not included)
++ * @param[in] color_data RGB color data that will be dumped to the specific window range
++ * @return
++ *          - ESP_OK on success
++ */
++esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t panel, int x_start, int y_start, int x_end, int y_end, const void *color_data);
++
++/**
++ * @brief Mirror the LCD panel on specific axis
++ *
++ * @note Combined with `esp_lcd_panel_swap_xy()`, one can realize screen rotation
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] mirror_x Whether the panel will be mirrored about the x axis
++ * @param[in] mirror_y Whether the panel will be mirrored about the y axis
++ * @return
++ *          - ESP_OK on success
++ *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++ */
++esp_err_t esp_lcd_panel_mirror(esp_lcd_panel_handle_t panel, bool mirror_x, bool mirror_y);
++
++/**
++ * @brief Swap/Exchange x and y axis
++ *
++ * @note Combined with `esp_lcd_panel_mirror()`, one can realize screen rotation
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] swap_axes Whether to swap the x and y axis
++ * @return
++ *          - ESP_OK on success
++ *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++ */
++esp_err_t esp_lcd_panel_swap_xy(esp_lcd_panel_handle_t panel, bool swap_axes);
++
++/**
++ * @brief Set extra gap in x and y axis
++ *
++ * The gap is the space (in pixels) between the left/top sides of the LCD panel and the first row/column respectively of the actual contents displayed.
++ *
++ * @note Setting a gap is useful when positioning or centering a frame that is smaller than the LCD.
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] x_gap Extra gap on x axis, in pixels
++ * @param[in] y_gap Extra gap on y axis, in pixels
++ * @return
++ *          - ESP_OK on success
++ */
++esp_err_t esp_lcd_panel_set_gap(esp_lcd_panel_handle_t panel, int x_gap, int y_gap);
++
++/**
++ * @brief Invert the color (bit-wise invert the color data line)
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] invert_color_data Whether to invert the color data
++ * @return
++ *          - ESP_OK on success
++ */
++esp_err_t esp_lcd_panel_invert_color(esp_lcd_panel_handle_t panel, bool invert_color_data);
++
++/**
++ * @brief Turn on or off the display
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] on_off True to turns on display, False to turns off display
++ * @return
++ *          - ESP_OK on success
++ *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++ */
++esp_err_t esp_lcd_panel_disp_on_off(esp_lcd_panel_handle_t panel, bool on_off);
++
++/**
++ * @brief Turn off the display
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] off Whether to turn off the screen
++ * @return
++ *          - ESP_OK on success
++ *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++ */
++esp_err_t esp_lcd_panel_disp_off(esp_lcd_panel_handle_t panel, bool off)
++__attribute__((deprecated("use esp_lcd_panel_disp_on_off instead")));
++
++/**
++ * @brief Enter or exit sleep mode
++ *
++ * @param[in] panel LCD panel handle, which is created by other factory API like `esp_lcd_new_panel_st7789()`
++ * @param[in] sleep True to enter sleep mode, False to wake up
++ * @return
++ *          - ESP_OK on success
++ *          - ESP_ERR_NOT_SUPPORTED if this function is not supported by the panel
++ */
++esp_err_t esp_lcd_panel_disp_sleep(esp_lcd_panel_handle_t panel, bool sleep);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_rgb.h b/mpy_support/esp_lcd_panel_rgb.h
+new file mode 100644
+index 0000000..389d49e
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_rgb.h
+@@ -0,0 +1,301 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdint.h>
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_types.h"
++#include "soc/soc_caps.h"
++#include "hal/lcd_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if SOC_LCD_RGB_SUPPORTED
++/**
++ * @brief LCD RGB timing structure
++ * @verbatim
++ *                                                 Total Width
++ *                             <--------------------------------------------------->
++ *                       HSYNC width HBP             Active Width                HFP
++ *                             <---><--><--------------------------------------><--->
++ *                         ____    ____|_______________________________________|____|
++ *                             |___|   |                                       |    |
++ *                                     |                                       |    |
++ *                         __|         |                                       |    |
++ *            /|\    /|\  |            |                                       |    |
++ *             | VSYNC|   |            |                                       |    |
++ *             |Width\|/  |__          |                                       |    |
++ *             |     /|\     |         |                                       |    |
++ *             |  VBP |      |         |                                       |    |
++ *             |     \|/_____|_________|_______________________________________|    |
++ *             |     /|\     |         | / / / / / / / / / / / / / / / / / / / |    |
++ *             |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *    Total    |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *    Height   |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *             |Active|      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *             |Height|      |         |/ / / / / / Active Display Area / / / /|    |
++ *             |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *             |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *             |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *             |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *             |      |      |         |/ / / / / / / / / / / / / / / / / / / /|    |
++ *             |     \|/_____|_________|_______________________________________|    |
++ *             |     /|\     |                                                      |
++ *             |  VFP |      |                                                      |
++ *            \|/    \|/_____|______________________________________________________|
++ * @endverbatim
++ */
++typedef struct {
++    uint32_t pclk_hz;           /*!< Frequency of pixel clock */
++    uint32_t h_res;             /*!< Horizontal resolution, i.e. the number of pixels in a line */
++    uint32_t v_res;             /*!< Vertical resolution, i.e. the number of lines in the frame  */
++    uint32_t hsync_pulse_width; /*!< Horizontal sync width, unit: PCLK period */
++    uint32_t hsync_back_porch;  /*!< Horizontal back porch, number of PCLK between hsync and start of line active data */
++    uint32_t hsync_front_porch; /*!< Horizontal front porch, number of PCLK between the end of active data and the next hsync */
++    uint32_t vsync_pulse_width; /*!< Vertical sync width, unit: number of lines */
++    uint32_t vsync_back_porch;  /*!< Vertical back porch, number of invalid lines between vsync and start of frame */
++    uint32_t vsync_front_porch; /*!< Vertical front porch, number of invalid lines between the end of frame and the next vsync */
++    struct {
++        uint32_t hsync_idle_low: 1;  /*!< The hsync signal is low in IDLE state */
++        uint32_t vsync_idle_low: 1;  /*!< The vsync signal is low in IDLE state */
++        uint32_t de_idle_high: 1;    /*!< The de signal is high in IDLE state */
++        uint32_t pclk_active_neg: 1; /*!< Whether the display data is clocked out on the falling edge of PCLK */
++        uint32_t pclk_idle_high: 1;  /*!< The PCLK stays at high level in IDLE phase */
++    } flags;                         /*!< LCD RGB timing flags */
++} esp_lcd_rgb_timing_t;
++
++/**
++ * @brief Type of RGB LCD panel event data
++ */
++typedef struct {
++} esp_lcd_rgb_panel_event_data_t;
++
++/**
++ * @brief A general function callback prototype for RGB panel driver
++ *
++ * @param[in] panel LCD panel handle, which is created by factory API like `esp_lcd_new_rgb_panel`
++ * @param[in] edata RGB panel event data, provided by driver
++ * @param[in] user_ctx User data, passed from `esp_lcd_rgb_panel_register_event_callbacks()`
++ * @return Whether a high priority task has been waken up by this function
++ */
++typedef bool (*esp_lcd_rgb_panel_general_cb_t)(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx);
++
++/**
++ * @brief Declare the prototype of the function that will be invoked when the user draw buffer is complete.
++ *        The draw buffer can be recycled after this event.
++ */
++typedef esp_lcd_rgb_panel_general_cb_t esp_lcd_rgb_panel_draw_buf_complete_cb_t;
++
++/**
++ * @brief Declare the prototype of the function that will be invoked when a whole frame buffer is sent to the LCD DMA.
++ *        The LCD hardware may still need some blank time to finish the refresh.
++ */
++typedef esp_lcd_rgb_panel_general_cb_t esp_lcd_rgb_panel_frame_buf_complete_cb_t;
++
++/**
++ * @brief Declare the prototype of the function that will be invoked when the LCD controller sends the VSYNC signal.
++ *        It means, the LCD hardware should be ready, and after some blank time, the next frame will be flushed to the LCD controller.
++ */
++typedef esp_lcd_rgb_panel_general_cb_t esp_lcd_rgb_panel_vsync_cb_t;
++
++/**
++ * @brief Prototype for function to re-fill a bounce buffer, rather than copying from the frame buffer
++ *
++ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel`
++ * @param[in] bounce_buf Bounce buffer to write data into
++ * @param[in] pos_px How many pixels already were sent to the display in this frame, in other words,
++ *                   at what pixel the routine should start putting data into bounce_buf
++ * @param[in] len_bytes Length, in bytes, of the bounce buffer. Routine should fill this length fully.
++ * @param[in] user_ctx Opaque pointer that was passed from `esp_lcd_rgb_panel_register_event_callbacks()`
++ * @return Whether a high priority task has been waken up by this function
++ */
++typedef bool (*esp_lcd_rgb_panel_bounce_buf_fill_cb_t)(esp_lcd_panel_handle_t panel, void *bounce_buf, int pos_px, int len_bytes, void *user_ctx);
++
++/** @cond */
++/// for backward compatible
++typedef esp_lcd_rgb_panel_frame_buf_complete_cb_t esp_lcd_rgb_panel_bounce_buf_finish_cb_t __attribute__((deprecated("esp_lcd_rgb_panel_bounce_buf_finish_cb_t is deprecated, use esp_lcd_rgb_panel_frame_buf_complete_cb_t instead")));
++/** @endcond */
++
++/**
++ * @brief Group of supported RGB LCD panel callbacks
++ * @note The callbacks are all running under ISR environment
++ * @note When CONFIG_LCD_RGB_ISR_IRAM_SAFE is enabled, the callback itself and functions called by it should be placed in IRAM.
++ */
++typedef struct {
++    esp_lcd_rgb_panel_draw_buf_complete_cb_t on_color_trans_done;  /*!< Invoked when user's color buffer copied to the internal frame buffer.
++                                                                      This is an indicator that the draw buffer can be recycled safely.
++                                                                      But doesn't mean the draw buffer finishes the refreshing to the screen. */
++    esp_lcd_rgb_panel_vsync_cb_t on_vsync;                         /*!< VSYNC event callback */
++    esp_lcd_rgb_panel_bounce_buf_fill_cb_t on_bounce_empty;        /*!< Bounce buffer empty callback. */
++    union {
++        esp_lcd_rgb_panel_frame_buf_complete_cb_t on_bounce_frame_finish __attribute__((deprecated)); /*!< Bounce buffer finish callback. */
++        esp_lcd_rgb_panel_frame_buf_complete_cb_t on_frame_buf_complete;  /*!< A whole frame buffer was just sent to the LCD DMA */
++    };
++} esp_lcd_rgb_panel_event_callbacks_t;
++
++/**
++ * @brief LCD RGB panel configuration structure
++ */
++typedef struct {
++    lcd_clock_source_t clk_src;   /*!< Clock source for the RGB LCD peripheral */
++    esp_lcd_rgb_timing_t timings; /*!< RGB timing parameters, including the screen resolution */
++    size_t data_width;            /*!< Number of data lines */
++    size_t bits_per_pixel;        /*!< Frame buffer color depth, in bpp, specially, if set to zero, it will default to `data_width`.
++                                       When using a Serial RGB interface, this value could be different from `data_width` */
++    size_t num_fbs;               /*!< Number of screen-sized frame buffers that allocated by the driver. By default (set to either 0 or 1) only one frame buffer will be used. Maximum number of buffers are 3 */
++    size_t bounce_buffer_size_px; /*!< If it's non-zero, the driver allocates two DRAM bounce buffers for DMA use.
++                                       DMA fetching from DRAM bounce buffer is much faster than PSRAM frame buffer. */
++    size_t sram_trans_align __attribute__((deprecated)); /*!< Alignment of buffers (frame buffer or bounce buffer) that allocated in SRAM */
++    union {
++        size_t psram_trans_align __attribute__((deprecated)); /*!< Alignment of buffers (frame buffer) that allocated in PSRAM */
++        size_t dma_burst_size;    /*!< DMA burst size, in bytes */
++    };
++    int hsync_gpio_num;           /*!< GPIO used for HSYNC signal */
++    int vsync_gpio_num;           /*!< GPIO used for VSYNC signal */
++    int de_gpio_num;              /*!< GPIO used for DE signal, set to -1 if it's not used */
++    int pclk_gpio_num;            /*!< GPIO used for PCLK signal, set to -1 if it's not used */
++    int disp_gpio_num;            /*!< GPIO used for display control signal, set to -1 if it's not used */
++    int data_gpio_nums[SOC_LCDCAM_RGB_DATA_WIDTH]; /*!< GPIOs used for data lines */
++    struct {
++        uint32_t disp_active_low: 1;     /*!< If this flag is enabled, a low level of display control signal can turn the screen on; vice versa */
++        uint32_t refresh_on_demand: 1;   /*!< If this flag is enabled, the host only refresh the frame buffer in `esp_lcd_panel_draw_bitmap` and `esp_lcd_rgb_panel_refresh`. */
++        uint32_t fb_in_psram: 1;         /*!< If this flag is enabled, the frame buffer will be allocated from PSRAM, preferentially */
++        uint32_t double_fb: 1;           /*!< If this flag is enabled, the driver will allocate two screen sized frame buffer, same as num_fbs=2 */
++        uint32_t no_fb: 1;               /*!< If this flag is enabled, the driver won't allocate frame buffer.
++                                              Instead, user should fill in the bounce buffer manually in the `on_bounce_empty` callback */
++        uint32_t bb_invalidate_cache: 1; /*!< If this flag is enabled, in bounce back mode we'll do a cache invalidate on the read data, freeing the cache.
++                                              Can be dangerous if data is written from other core(s). */
++    } flags;                             /*!< LCD RGB panel configuration flags */
++} esp_lcd_rgb_panel_config_t;
++
++/**
++ * @brief Create RGB LCD panel
++ *
++ * @param[in] rgb_panel_config RGB panel configuration
++ * @param[out] ret_panel Returned LCD panel handle
++ * @return
++ *      - ESP_ERR_INVALID_ARG: Create RGB LCD panel failed because of invalid argument
++ *      - ESP_ERR_NO_MEM: Create RGB LCD panel failed because of out of memory
++ *      - ESP_ERR_NOT_FOUND: Create RGB LCD panel failed because some mandatory hardware resources are not found
++ *      - ESP_OK: Create RGB LCD panel successfully
++ */
++esp_err_t esp_lcd_new_rgb_panel(const esp_lcd_rgb_panel_config_t *rgb_panel_config, esp_lcd_panel_handle_t *ret_panel);
++
++/**
++ * @brief Register LCD RGB panel event callbacks
++ *
++ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel`
++ * @param[in] callbacks Group of callback functions
++ * @param[in] user_ctx User data, which will be passed to the callback functions directly
++ * @return
++ *      - ESP_OK: Set event callbacks successfully
++ *      - ESP_ERR_INVALID_ARG: Set event callbacks failed because of invalid argument
++ *      - ESP_FAIL: Set event callbacks failed because of other error
++ */
++esp_err_t esp_lcd_rgb_panel_register_event_callbacks(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_callbacks_t *callbacks, void *user_ctx);
++
++/**
++ * @brief Set frequency of PCLK for RGB LCD panel
++ *
++ * @note The PCLK frequency is set in the `esp_lcd_rgb_timing_t` and gets configured during LCD panel initialization.
++ *       Usually you don't need to call this function to set the PCLK again, but in some cases, you might want to change the PCLK frequency.
++ *       e.g. slow down the PCLK frequency to reduce power consumption or to reduce the memory throughput during OTA.
++ * @note This function doesn't cause the hardware to update the PCLK immediately but to record the new frequency and set a flag internally.
++ *       Only in the next VSYNC event handler, will the driver attempt to update the PCLK frequency.
++ *
++ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel`
++ * @param[in] freq_hz Frequency of pixel clock, in Hz
++ * @return
++ *      - ESP_ERR_INVALID_ARG: Set PCLK frequency failed because of invalid argument
++ *      - ESP_OK: Set PCLK frequency successfully
++ */
++esp_err_t esp_lcd_rgb_panel_set_pclk(esp_lcd_panel_handle_t panel, uint32_t freq_hz);
++
++/**
++ * @brief Restart the LCD transmission
++ *
++ * @note This function can be useful when the LCD controller is out of sync with the DMA because of insufficient bandwidth.
++ *       To save the screen from a permanent shift, you can call this function to restart the LCD DMA.
++ * @note This function doesn't restart the DMA immediately but to set a flag internally.
++ *       Only in the next VSYNC event handler, will the driver attempt to do the restart job.
++ * @note If CONFIG_LCD_RGB_RESTART_IN_VSYNC is enabled, you don't need to call this function manually,
++ *       because the restart job will be done automatically in the VSYNC event handler.
++ *
++ * @param[in] panel panel LCD panel handle, returned from `esp_lcd_new_rgb_panel`
++ * @return
++ *      - ESP_ERR_INVALID_ARG: Restart the LCD failed because of invalid argument
++ *      - ESP_ERR_INVALID_STATE: Restart the LCD failed because the LCD diver is working in refresh-on-demand mode
++ *      - ESP_OK: Restart the LCD successfully
++ */
++esp_err_t esp_lcd_rgb_panel_restart(esp_lcd_panel_handle_t panel);
++
++/**
++ * @brief Get the address of the frame buffer(s) that allocated by the driver
++ *
++ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel`
++ * @param[in] fb_num Number of frame buffer(s) to get. This value must be the same as the number of the following parameters.
++ * @param[out] fb0 Returned address of the frame buffer 0
++ * @param[out] ... List of other frame buffer addresses
++ * @return
++ *      - ESP_ERR_INVALID_ARG: Get frame buffer address failed because of invalid argument
++ *      - ESP_OK: Get frame buffer address successfully
++ */
++esp_err_t esp_lcd_rgb_panel_get_frame_buffer(esp_lcd_panel_handle_t panel, uint32_t fb_num, void **fb0, ...);
++
++/**
++ * @brief Manually trigger once transmission of the frame buffer to the LCD panel
++ *
++ * @note This function should only be called when the RGB panel is working under the `refresh_on_demand` mode.
++ *
++ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel`
++ * @return
++ *      - ESP_ERR_INVALID_ARG: Start a refresh failed because of invalid argument
++ *      - ESP_ERR_INVALID_STATE: Start a refresh failed because the LCD panel is not created with the `refresh_on_demand` flag enabled.
++ *      - ESP_OK: Start a refresh successfully
++ */
++esp_err_t esp_lcd_rgb_panel_refresh(esp_lcd_panel_handle_t panel);
++
++/**
++ * @brief LCD color conversion profile
++ */
++typedef struct {
++    lcd_color_space_t color_space; /*!< Color space of the image */
++    lcd_color_range_t color_range; /*!< Color range of the image */
++    lcd_yuv_sample_t yuv_sample;   /*!< YUV sample format of the image */
++} esp_lcd_color_conv_profile_t;
++
++/**
++ * @brief Configuration of YUG-RGB conversion
++ */
++typedef struct {
++    lcd_yuv_conv_std_t std;           /*!< YUV conversion standard: BT601, BT709 */
++    esp_lcd_color_conv_profile_t src; /*!< Color conversion profile of the input image */
++    esp_lcd_color_conv_profile_t dst; /*!< Color conversion profile of the output image */
++} esp_lcd_yuv_conv_config_t;
++
++/**
++ * @brief Configure how to convert the color format between RGB and YUV
++ *
++ * @note Pass in `config` as NULL will disable the RGB-YUV converter.
++ * @note The hardware converter can only parse a "packed" storage format, while "planar" and "semi-planar" format is not supported.
++ *
++ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel`
++ * @param[in] config Configuration of RGB-YUV conversion
++ * @return
++ *      - ESP_ERR_INVALID_ARG: Configure RGB-YUV conversion failed because of invalid argument
++ *      - ESP_ERR_NOT_SUPPORTED: Configure RGB-YUV conversion failed because the conversion mode is not supported by the hardware
++ *      - ESP_OK: Configure RGB-YUV conversion successfully
++ */
++esp_err_t esp_lcd_rgb_panel_set_yuv_conversion(esp_lcd_panel_handle_t panel, const esp_lcd_yuv_conv_config_t *config);
++
++#endif // SOC_LCD_RGB_SUPPORTED
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_ssd1306.h b/mpy_support/esp_lcd_panel_ssd1306.h
+new file mode 100644
+index 0000000..387e016
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_ssd1306.h
+@@ -0,0 +1,61 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_panel_dev.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief SSD1306 configuration structure
++ *
++ * To be used as esp_lcd_panel_dev_config_t.vendor_config.
++ * See esp_lcd_new_panel_ssd1306().
++ */
++typedef struct {
++    /**
++     * @brief Display's height in pixels (64(default) or 32)
++     */
++    uint8_t height;
++} esp_lcd_panel_ssd1306_config_t;
++
++/**
++ * @brief Create LCD panel for model SSD1306
++ *
++ * @param[in] io LCD panel IO handle
++ * @param[in] panel_dev_config general panel device configuration
++ * @param[out] ret_panel Returned LCD panel handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ *
++ * @note The default panel size is 128x64.
++ * @note Use esp_lcd_panel_ssd1306_config_t to set the correct size.
++ * Example usage:
++ * @code {c}
++ *
++ * esp_lcd_panel_ssd1306_config_t ssd1306_config = {
++ *     .height = 32
++ * };
++ * esp_lcd_panel_dev_config_t panel_config = {
++ *     <...>
++ *     .vendor_config = &ssd1306_config
++ * };
++ *
++ * esp_lcd_panel_handle_t panel_handle = NULL;
++ * esp_lcd_new_panel_ssd1306(io_handle, &panel_config, &panel_handle);
++ * @endcode
++ */
++esp_err_t esp_lcd_new_panel_ssd1306(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel_dev_config_t *panel_dev_config, esp_lcd_panel_handle_t *ret_panel);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_st7789.h b/mpy_support/esp_lcd_panel_st7789.h
+new file mode 100644
+index 0000000..d92d03d
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_st7789.h
+@@ -0,0 +1,31 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_err.h"
++#include "esp_lcd_panel_dev.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Create LCD panel for model ST7789
++ *
++ * @param[in] io LCD panel IO handle
++ * @param[in] panel_dev_config general panel device configuration
++ * @param[out] ret_panel Returned LCD panel handle
++ * @return
++ *          - ESP_ERR_INVALID_ARG   if parameter is invalid
++ *          - ESP_ERR_NO_MEM        if out of memory
++ *          - ESP_OK                on success
++ */
++esp_err_t esp_lcd_new_panel_st7789(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel_dev_config_t *panel_dev_config, esp_lcd_panel_handle_t *ret_panel);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_lcd_panel_vendor.h b/mpy_support/esp_lcd_panel_vendor.h
+new file mode 100644
+index 0000000..763d022
+--- /dev/null
++++ b/mpy_support/esp_lcd_panel_vendor.h
+@@ -0,0 +1,12 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#pragma once
++
++#include "esp_lcd_panel_dev.h"
++#include "esp_lcd_panel_ssd1306.h"
++#include "esp_lcd_panel_st7789.h"
++#include "esp_lcd_panel_nt35510.h"
+diff --git a/mpy_support/esp_lcd_types.h b/mpy_support/esp_lcd_types.h
+new file mode 100644
+index 0000000..2de4306
+--- /dev/null
++++ b/mpy_support/esp_lcd_types.h
+@@ -0,0 +1,96 @@
++/*
++ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <stdbool.h>
++#include "esp_assert.h"
++#include "hal/lcd_types.h"
++#include "hal/mipi_dsi_types.h"
++#include "hal/color_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Timing parameters for the video data transmission
++ */
++typedef struct {
++    uint32_t h_size;            /*!< Horizontal resolution, i.e. the number of pixels in a line */
++    uint32_t v_size;            /*!< Vertical resolution, i.e. the number of lines in the frame  */
++    uint32_t hsync_pulse_width; /*!< Horizontal sync width, in pixel clock */
++    uint32_t hsync_back_porch;  /*!< Horizontal back porch, number of pixel clock between hsync and start of line active data */
++    uint32_t hsync_front_porch; /*!< Horizontal front porch, number of pixel clock between the end of active data and the next hsync */
++    uint32_t vsync_pulse_width; /*!< Vertical sync width, in number of lines */
++    uint32_t vsync_back_porch;  /*!< Vertical back porch, number of invalid lines between vsync and start of frame */
++    uint32_t vsync_front_porch; /*!< Vertical front porch, number of invalid lines between the end of frame and the next vsync */
++} esp_lcd_video_timing_t;
++
++typedef struct esp_lcd_panel_io_t *esp_lcd_panel_io_handle_t; /*!< Type of LCD panel IO handle */
++typedef struct esp_lcd_panel_t *esp_lcd_panel_handle_t;       /*!< Type of LCD panel handle */
++
++/**
++ * @brief RGB element order
++ */
++typedef enum {
++    LCD_RGB_ELEMENT_ORDER_RGB = COLOR_RGB_ELEMENT_ORDER_RGB, /*!< RGB element order: RGB */
++    LCD_RGB_ELEMENT_ORDER_BGR = COLOR_RGB_ELEMENT_ORDER_BGR, /*!< RGB element order: BGR */
++} lcd_rgb_element_order_t;
++
++/** @cond */
++/// for backward compatible
++typedef lcd_rgb_element_order_t lcd_color_rgb_endian_t;
++#define LCD_RGB_ENDIAN_RGB (lcd_color_rgb_endian_t)LCD_RGB_ELEMENT_ORDER_RGB
++#define LCD_RGB_ENDIAN_BGR (lcd_color_rgb_endian_t)LCD_RGB_ELEMENT_ORDER_BGR
++
++typedef lcd_rgb_element_order_t esp_lcd_color_space_t;
++#define ESP_LCD_COLOR_SPACE_RGB (esp_lcd_color_space_t)LCD_RGB_ELEMENT_ORDER_RGB
++#define ESP_LCD_COLOR_SPACE_BGR (esp_lcd_color_space_t)LCD_RGB_ELEMENT_ORDER_BGR
++#define ESP_LCD_COLOR_SPACE_MONOCHROME (esp_lcd_color_space_t)2
++/** @endcond */
++
++/**
++ * @brief Type of LCD panel IO event data
++ */
++typedef struct {
++} esp_lcd_panel_io_event_data_t;
++
++/**
++ * @brief Declare the prototype of the function that will be invoked when panel IO finishes transferring color data
++ *
++ * @param[in] panel_io LCD panel IO handle, which is created by factory API like `esp_lcd_new_panel_io_spi()`
++ * @param[in] edata Panel IO event data, fed by driver
++ * @param[in] user_ctx User data, passed from `esp_lcd_panel_io_xxx_config_t`
++ * @return Whether a high priority task has been waken up by this function
++ */
++typedef bool (*esp_lcd_panel_io_color_trans_done_cb_t)(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx);
++
++/**
++ * @brief Type of LCD panel IO callbacks
++ */
++typedef struct {
++    esp_lcd_panel_io_color_trans_done_cb_t on_color_trans_done; /*!< Callback invoked when color data transfer has finished */
++} esp_lcd_panel_io_callbacks_t;
++
++/**
++ * @brief Configuration of LCD color conversion
++ */
++typedef struct {
++    lcd_color_range_t in_color_range;    /*!< Color range of the input color */
++    lcd_color_range_t out_color_range;   /*!< Color range of the output color */
++    union {
++        struct {
++            lcd_yuv_conv_std_t conv_std; /*!< YUV conversion standard: BT601, BT709 */
++            struct {
++                lcd_yuv422_pack_order_t in_pack_order; /*!< YUV422 packing order of the input color */
++            } yuv422; /*!< YUV422 specific */
++        } yuv; /*!< YUV specific */
++    } spec; /*!< Extra configuration for specific color conversion */
++} esp_lcd_color_conv_config_t;
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/mpy_support/esp_panel_mp_board.cpp b/mpy_support/esp_panel_mp_board.cpp
+index bbd48d4..d55f283 100644
+--- a/mpy_support/esp_panel_mp_board.cpp
++++ b/mpy_support/esp_panel_mp_board.cpp
+@@ -63,6 +63,92 @@ static mp_obj_t board_color_bar_test(mp_obj_t self_in)
+ }
+ static MP_DEFINE_CONST_FUN_OBJ_1_CXX(board_color_bar_test_func_obj, board_color_bar_test);
+ 
++static mp_obj_t board_get_width(mp_obj_t self_in)
++{
++    MP_Board *self = static_cast<MP_Board *>(MP_OBJ_TO_PTR(self_in));
++
++    return mp_obj_new_int(self->board->getLCD()->getFrameWidth());
++}
++static MP_DEFINE_CONST_FUN_OBJ_1_CXX(board_get_width_func_obj, board_get_width);
++
++static mp_obj_t board_get_height(mp_obj_t self_in)
++{
++    MP_Board *self = static_cast<MP_Board *>(MP_OBJ_TO_PTR(self_in));
++
++    return mp_obj_new_int(self->board->getLCD()->getFrameHeight());
++}
++static MP_DEFINE_CONST_FUN_OBJ_1_CXX(board_get_height_func_obj, board_get_height);
++
++// draw_bitmap(x, y, w, h, buf) — buf must be a bytes/bytearray of w*h*2 bytes (RGB565)
++static mp_obj_t board_draw_bitmap(size_t n_args, const mp_obj_t *args)
++{
++    MP_Board *self = static_cast<MP_Board *>(MP_OBJ_TO_PTR(args[0]));
++    int x = mp_obj_get_int(args[1]);
++    int y = mp_obj_get_int(args[2]);
++    int w = mp_obj_get_int(args[3]);
++    int h = mp_obj_get_int(args[4]);
++    mp_buffer_info_t bufinfo;
++    mp_get_buffer_raise(args[5], &bufinfo, MP_BUFFER_READ);
++
++    auto lcd = self->board->getLCD();
++    const uint8_t *src = static_cast<const uint8_t *>(bufinfo.buf);
++    int bytes_per_px = lcd->getFrameColorBits() / 8;
++    int chunk_rows = 30;
++    int stride = w * bytes_per_px;
++
++    // For QSPI bus, byte-swap each 16-bit pixel to match SPI_SWAP_DATA_TX used internally
++    bool is_qspi = (lcd->getBus()->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_QSPI);
++
++    // Allocate a chunk buffer for swapped data
++    int chunk_bytes = chunk_rows * stride;
++    std::vector<uint8_t> chunk_buf(chunk_bytes);
++
++    bool ok = true;
++    for (int row = 0; row < h && ok; row += chunk_rows) {
++        int rows = (row + chunk_rows <= h) ? chunk_rows : (h - row);
++        int nbytes = rows * stride;
++        const uint8_t *chunk_src = src + row * stride;
++
++        if (is_qspi && bytes_per_px == 2) {
++            for (int i = 0; i < nbytes; i += 2) {
++                chunk_buf[i]     = chunk_src[i + 1];
++                chunk_buf[i + 1] = chunk_src[i];
++            }
++            ok = lcd->drawBitmap(x, y + row, w, rows, chunk_buf.data(), -1);
++        } else {
++            ok = lcd->drawBitmap(x, y + row, w, rows, chunk_src, -1);
++        }
++    }
++    return mp_obj_new_bool(ok);
++}
++static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(board_draw_bitmap_func_obj, 6, 6, board_draw_bitmap);
++
++// read_touch() -> list of (x, y, strength) tuples, or empty list if no touch
++static mp_obj_t board_read_touch(mp_obj_t self_in)
++{
++    MP_Board *self = static_cast<MP_Board *>(MP_OBJ_TO_PTR(self_in));
++
++    auto *touch = self->board->getTouch();
++    if (touch == nullptr || !touch->isOverState(drivers::Touch::State::BEGIN)) {
++        return mp_obj_new_list(0, nullptr);
++    }
++
++    drivers::TouchPoint points[5];
++    int n = touch->readPoints(points, 5, 0);
++
++    mp_obj_t list = mp_obj_new_list(0, nullptr);
++    for (int i = 0; i < n; i++) {
++        mp_obj_t tuple[3] = {
++            mp_obj_new_int(points[i].x),
++            mp_obj_new_int(points[i].y),
++            mp_obj_new_int(points[i].strength),
++        };
++        mp_obj_list_append(list, mp_obj_new_tuple(3, tuple));
++    }
++    return list;
++}
++static MP_DEFINE_CONST_FUN_OBJ_1_CXX(board_read_touch_func_obj, board_read_touch);
++
+ // Local dict
+ static const mp_rom_map_elem_t locals_dict_table[] = {
+     { MP_ROM_QSTR(MP_QSTR__del__), MP_ROM_PTR(&board_del_func_obj) },
+@@ -70,6 +156,10 @@ static const mp_rom_map_elem_t locals_dict_table[] = {
+     { MP_ROM_QSTR(MP_QSTR_begin), MP_ROM_PTR(&board_begin_func_obj) },
+     { MP_ROM_QSTR(MP_QSTR_deinit), MP_ROM_PTR(&board_deinit_func_obj) },
+     { MP_ROM_QSTR(MP_QSTR_color_bar_test), MP_ROM_PTR(&board_color_bar_test_func_obj) },
++    { MP_ROM_QSTR(MP_QSTR_get_width), MP_ROM_PTR(&board_get_width_func_obj) },
++    { MP_ROM_QSTR(MP_QSTR_get_height), MP_ROM_PTR(&board_get_height_func_obj) },
++    { MP_ROM_QSTR(MP_QSTR_draw_bitmap), MP_ROM_PTR(&board_draw_bitmap_func_obj) },
++    { MP_ROM_QSTR(MP_QSTR_read_touch), MP_ROM_PTR(&board_read_touch_func_obj) },
+ };
+ static MP_DEFINE_CONST_DICT(board_locals_dict, locals_dict_table);
+ 
+diff --git a/src/board/supported/esp_panel_board_config_supported.h b/src/board/supported/esp_panel_board_config_supported.h
+index d747fce..357f85e 100644
+--- a/src/board/supported/esp_panel_board_config_supported.h
++++ b/src/board/supported/esp_panel_board_config_supported.h
+@@ -90,6 +90,7 @@
+         /* JingCai */ \
+         + defined(BOARD_JINGCAI_ESP32_4848S040C_I_Y_3) \
+         + defined(BOARD_JINGCAI_JC8048W550C) \
++        + defined(BOARD_JC3248W535EN) \
+         /* Waveshare */ \
+         + defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85) \
+         + defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85_C) \
+@@ -169,6 +170,8 @@
+         #include "jingcai/BOARD_JINGCAI_ESP32_4848S040C_I_Y_3.h"
+     #elif defined(BOARD_JINGCAI_JC8048W550C)
+         #include "jingcai/BOARD_JINGCAI_JC8048W550C.h"
++    #elif defined(BOARD_JC3248W535EN)
++        #include "jingcai/BOARD_JC3248W535EN.h"
+     /* Waveshare */
+     #elif defined(BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85)
+         #include "waveshare/BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85.h"
+diff --git a/src/board/supported/jingcai/BOARD_JC3248W535EN.h b/src/board/supported/jingcai/BOARD_JC3248W535EN.h
+new file mode 100644
+index 0000000..1cd8472
+--- /dev/null
++++ b/src/board/supported/jingcai/BOARD_JC3248W535EN.h
+@@ -0,0 +1,188 @@
++/*
++ * SPDX-FileCopyrightText: 2024-2025 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++/**
++ * @file   BOARD_JC3248W535EN.h
++ * @brief  Configuration file for JC3248W535EN (Guition "Cheap Black Display")
++ *         ESP32-S3 + AXS15231B (QSPI) 3.5" 320x480, capacitive touch (I2C)
++ * @note   CASET/RASET ignored by IC — only full-frame writes work.
++ *         Hardware rotation (MADCTL MV) also broken — use portrait mode.
++ */
++
++#pragma once
++
++// *INDENT-OFF*
++
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++//////////////////////////// Please update the following macros to configure general panel /////////////////////////////
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++#define ESP_PANEL_BOARD_NAME                "JC:JC3248W535EN"
++
++#define ESP_PANEL_BOARD_WIDTH               (320)
++#define ESP_PANEL_BOARD_HEIGHT              (480)
++
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++//////////////////////////// LCD panel ////////////////////////////////////////////////////////////////////////////////
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++#define ESP_PANEL_BOARD_USE_LCD             (1)
++
++#if ESP_PANEL_BOARD_USE_LCD
++
++#define ESP_PANEL_BOARD_LCD_CONTROLLER      AXS15231B
++
++#define ESP_PANEL_BOARD_LCD_BUS_TYPE        (ESP_PANEL_BUS_TYPE_QSPI)
++
++#if (ESP_PANEL_BOARD_LCD_BUS_TYPE == ESP_PANEL_BUS_TYPE_SPI) || \
++    (ESP_PANEL_BOARD_LCD_BUS_TYPE == ESP_PANEL_BUS_TYPE_QSPI)
++#define ESP_PANEL_BOARD_LCD_BUS_SKIP_INIT_HOST      (0)
++#endif
++
++#if ESP_PANEL_BOARD_LCD_BUS_TYPE == ESP_PANEL_BUS_TYPE_QSPI
++
++    /* QSPI bus */
++    #define ESP_PANEL_BOARD_LCD_QSPI_HOST_ID        (1)     // SPI2_HOST = 1
++#if !ESP_PANEL_BOARD_LCD_BUS_SKIP_INIT_HOST
++    #define ESP_PANEL_BOARD_LCD_QSPI_IO_SCK         (47)    // SCLK
++    #define ESP_PANEL_BOARD_LCD_QSPI_IO_DATA0       (21)    // DATA0 (MOSI/SIO0)
++    #define ESP_PANEL_BOARD_LCD_QSPI_IO_DATA1       (48)    // DATA1 (SIO1)
++    #define ESP_PANEL_BOARD_LCD_QSPI_IO_DATA2       (40)    // DATA2 (SIO2/WP)
++    #define ESP_PANEL_BOARD_LCD_QSPI_IO_DATA3       (39)    // DATA3 (SIO3/HOLD)
++#endif
++    #define ESP_PANEL_BOARD_LCD_QSPI_IO_CS          (45)    // CS
++    #define ESP_PANEL_BOARD_LCD_QSPI_MODE           (0)     // SPI mode 0
++    #define ESP_PANEL_BOARD_LCD_QSPI_CLK_HZ         (20 * 1000 * 1000)  // 20 MHz — 40 MHz causes noise via GPIO matrix
++    #define ESP_PANEL_BOARD_LCD_QSPI_CMD_BITS       (32)    // AXS15231B QSPI: 32-bit command phase
++    #define ESP_PANEL_BOARD_LCD_QSPI_PARAM_BITS     (8)
++
++#endif // ESP_PANEL_BOARD_LCD_BUS_TYPE
++
++/* Vendor-specific init sequence from JC3248W535EN official demo (esp_bsp.c) */
++#define ESP_PANEL_BOARD_LCD_VENDOR_INIT_CMD()                                                   \
++    {                                                                                           \
++    {0xBB, (uint8_t []){0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5A, 0xA5}, 8, 0},               \
++    {0xA0, (uint8_t []){0xC0, 0x10, 0x00, 0x02, 0x00, 0x00, 0x04, 0x3F, 0x20, 0x05, 0x3F, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00}, 17, 0}, \
++    {0xA2, (uint8_t []){0x30, 0x3C, 0x24, 0x14, 0xD0, 0x20, 0xFF, 0xE0, 0x40, 0x19, 0x80, 0x80, 0x80, 0x20, 0xf9, 0x10, 0x02, 0xff, 0xff, 0xF0, 0x90, 0x01, 0x32, 0xA0, 0x91, 0xE0, 0x20, 0x7F, 0xFF, 0x00, 0x5A}, 31, 0}, \
++    {0xD0, (uint8_t []){0xE0, 0x40, 0x51, 0x24, 0x08, 0x05, 0x10, 0x01, 0x20, 0x15, 0x42, 0xC2, 0x22, 0x22, 0xAA, 0x03, 0x10, 0x12, 0x60, 0x14, 0x1E, 0x51, 0x15, 0x00, 0x8A, 0x20, 0x00, 0x03, 0x3A, 0x12}, 30, 0}, \
++    {0xA3, (uint8_t []){0xA0, 0x06, 0xAa, 0x00, 0x08, 0x02, 0x0A, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x55, 0x55}, 22, 0}, \
++    {0xC1, (uint8_t []){0x31, 0x04, 0x02, 0x02, 0x71, 0x05, 0x24, 0x55, 0x02, 0x00, 0x41, 0x00, 0x53, 0xFF, 0xFF, 0xFF, 0x4F, 0x52, 0x00, 0x4F, 0x52, 0x00, 0x45, 0x3B, 0x0B, 0x02, 0x0d, 0x00, 0xFF, 0x40}, 30, 0}, \
++    {0xC3, (uint8_t []){0x00, 0x00, 0x00, 0x50, 0x03, 0x00, 0x00, 0x00, 0x01, 0x80, 0x01}, 11, 0}, \
++    {0xC4, (uint8_t []){0x00, 0x24, 0x33, 0x80, 0x00, 0xea, 0x64, 0x32, 0xC8, 0x64, 0xC8, 0x32, 0x90, 0x90, 0x11, 0x06, 0xDC, 0xFA, 0x00, 0x00, 0x80, 0xFE, 0x10, 0x10, 0x00, 0x0A, 0x0A, 0x44, 0x50}, 29, 0}, \
++    {0xC5, (uint8_t []){0x18, 0x00, 0x00, 0x03, 0xFE, 0x3A, 0x4A, 0x20, 0x30, 0x10, 0x88, 0xDE, 0x0D, 0x08, 0x0F, 0x0F, 0x01, 0x3A, 0x4A, 0x20, 0x10, 0x10, 0x00}, 23, 0}, \
++    {0xC6, (uint8_t []){0x05, 0x0A, 0x05, 0x0A, 0x00, 0xE0, 0x2E, 0x0B, 0x12, 0x22, 0x12, 0x22, 0x01, 0x03, 0x00, 0x3F, 0x6A, 0x18, 0xC8, 0x22}, 20, 0}, \
++    {0xC7, (uint8_t []){0x50, 0x32, 0x28, 0x00, 0xa2, 0x80, 0x8f, 0x00, 0x80, 0xff, 0x07, 0x11, 0x9c, 0x67, 0xff, 0x24, 0x0c, 0x0d, 0x0e, 0x0f}, 20, 0}, \
++    {0xC9, (uint8_t []){0x33, 0x44, 0x44, 0x01}, 4, 0}, \
++    {0xCF, (uint8_t []){0x2C, 0x1E, 0x88, 0x58, 0x13, 0x18, 0x56, 0x18, 0x1E, 0x68, 0x88, 0x00, 0x65, 0x09, 0x22, 0xC4, 0x0C, 0x77, 0x22, 0x44, 0xAA, 0x55, 0x08, 0x08, 0x12, 0xA0, 0x08}, 27, 0}, \
++    {0xD5, (uint8_t []){0x40, 0x8E, 0x8D, 0x01, 0x35, 0x04, 0x92, 0x74, 0x04, 0x92, 0x74, 0x04, 0x08, 0x6A, 0x04, 0x46, 0x03, 0x03, 0x03, 0x03, 0x82, 0x01, 0x03, 0x00, 0xE0, 0x51, 0xA1, 0x00, 0x00, 0x00}, 30, 0}, \
++    {0xD6, (uint8_t []){0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, 0x93, 0x00, 0x01, 0x83, 0x07, 0x07, 0x00, 0x07, 0x07, 0x00, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x00, 0x84, 0x00, 0x20, 0x01, 0x00}, 30, 0}, \
++    {0xD7, (uint8_t []){0x03, 0x01, 0x0b, 0x09, 0x0f, 0x0d, 0x1E, 0x1F, 0x18, 0x1d, 0x1f, 0x19, 0x40, 0x8E, 0x04, 0x00, 0x20, 0xA0, 0x1F}, 19, 0}, \
++    {0xD8, (uint8_t []){0x02, 0x00, 0x0a, 0x08, 0x0e, 0x0c, 0x1E, 0x1F, 0x18, 0x1d, 0x1f, 0x19}, 12, 0}, \
++    {0xD9, (uint8_t []){0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F}, 12, 0}, \
++    {0xDD, (uint8_t []){0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F}, 12, 0}, \
++    {0xDF, (uint8_t []){0x44, 0x73, 0x4B, 0x69, 0x00, 0x0A, 0x02, 0x90}, 8, 0}, \
++    {0xE0, (uint8_t []){0x3B, 0x28, 0x10, 0x16, 0x0c, 0x06, 0x11, 0x28, 0x5c, 0x21, 0x0D, 0x35, 0x13, 0x2C, 0x33, 0x28, 0x0D}, 17, 0}, \
++    {0xE1, (uint8_t []){0x37, 0x28, 0x10, 0x16, 0x0b, 0x06, 0x11, 0x28, 0x5C, 0x21, 0x0D, 0x35, 0x14, 0x2C, 0x33, 0x28, 0x0F}, 17, 0}, \
++    {0xE2, (uint8_t []){0x3B, 0x07, 0x12, 0x18, 0x0E, 0x0D, 0x17, 0x35, 0x44, 0x32, 0x0C, 0x14, 0x14, 0x36, 0x3A, 0x2F, 0x0D}, 17, 0}, \
++    {0xE3, (uint8_t []){0x37, 0x07, 0x12, 0x18, 0x0E, 0x0D, 0x17, 0x35, 0x44, 0x32, 0x0C, 0x14, 0x14, 0x36, 0x32, 0x2F, 0x0F}, 17, 0}, \
++    {0xE4, (uint8_t []){0x3B, 0x07, 0x12, 0x18, 0x0E, 0x0D, 0x17, 0x39, 0x44, 0x2E, 0x0C, 0x14, 0x14, 0x36, 0x3A, 0x2F, 0x0D}, 17, 0}, \
++    {0xE5, (uint8_t []){0x37, 0x07, 0x12, 0x18, 0x0E, 0x0D, 0x17, 0x39, 0x44, 0x2E, 0x0C, 0x14, 0x14, 0x36, 0x3A, 0x2F, 0x0F}, 17, 0}, \
++    {0xA4, (uint8_t []){0x85, 0x85, 0x95, 0x82, 0xAF, 0xAA, 0xAA, 0x80, 0x10, 0x30, 0x40, 0x40, 0x20, 0xFF, 0x60, 0x30}, 16, 0}, \
++    {0xA4, (uint8_t []){0x85, 0x85, 0x95, 0x85}, 4, 0}, \
++    {0xBB, (uint8_t []){0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 8, 0}, \
++    {0x13, (uint8_t []){0x00}, 0, 0}, \
++    {0x11, (uint8_t []){0x00}, 0, 120}, \
++    {0x2C, (uint8_t []){0x00, 0x00, 0x00, 0x00}, 4, 0}, \
++    }
++
++#define ESP_PANEL_BOARD_LCD_COLOR_BITS          (ESP_PANEL_LCD_COLOR_BITS_RGB565)
++#define ESP_PANEL_BOARD_LCD_COLOR_BGR_ORDER     (0)     // RGB order
++#define ESP_PANEL_BOARD_LCD_COLOR_INEVRT_BIT    (0)
++
++#define ESP_PANEL_BOARD_LCD_SWAP_XY             (0)     // HW rotation broken — use portrait
++#define ESP_PANEL_BOARD_LCD_MIRROR_X            (0)
++#define ESP_PANEL_BOARD_LCD_MIRROR_Y            (0)
++#define ESP_PANEL_BOARD_LCD_GAP_X               (0)
++#define ESP_PANEL_BOARD_LCD_GAP_Y               (0)
++
++#define ESP_PANEL_BOARD_LCD_RST_IO              (-1)    // No reset pin on this board
++#define ESP_PANEL_BOARD_LCD_RST_LEVEL           (0)
++
++#endif // ESP_PANEL_BOARD_USE_LCD
++
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++//////////////////////////// Touch panel //////////////////////////////////////////////////////////////////////////////
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++#define ESP_PANEL_BOARD_USE_TOUCH               (1)
++
++#if ESP_PANEL_BOARD_USE_TOUCH
++
++#define ESP_PANEL_BOARD_TOUCH_CONTROLLER        AXS15231B
++
++#define ESP_PANEL_BOARD_TOUCH_BUS_TYPE          (ESP_PANEL_BUS_TYPE_I2C)
++
++#if (ESP_PANEL_BOARD_TOUCH_BUS_TYPE == ESP_PANEL_BUS_TYPE_I2C) || \
++    (ESP_PANEL_BOARD_TOUCH_BUS_TYPE == ESP_PANEL_BUS_TYPE_SPI)
++#define ESP_PANEL_BOARD_TOUCH_BUS_SKIP_INIT_HOST        (0)
++#endif
++
++#if ESP_PANEL_BOARD_TOUCH_BUS_TYPE == ESP_PANEL_BUS_TYPE_I2C
++
++    #define ESP_PANEL_BOARD_TOUCH_I2C_HOST_ID           (0)     // I2C0
++#if !ESP_PANEL_BOARD_TOUCH_BUS_SKIP_INIT_HOST
++    #define ESP_PANEL_BOARD_TOUCH_I2C_CLK_HZ            (400 * 1000)
++    #define ESP_PANEL_BOARD_TOUCH_I2C_SCL_PULLUP        (1)
++    #define ESP_PANEL_BOARD_TOUCH_I2C_SDA_PULLUP        (1)
++    #define ESP_PANEL_BOARD_TOUCH_I2C_IO_SCL            (8)     // GPIO 8 (shared with LCD DC in QSPI mode)
++    #define ESP_PANEL_BOARD_TOUCH_I2C_IO_SDA            (4)
++#endif
++    #define ESP_PANEL_BOARD_TOUCH_I2C_ADDRESS           (0)     // Use default AXS15231B touch address
++
++#endif // ESP_PANEL_BOARD_TOUCH_BUS_TYPE
++
++#define ESP_PANEL_BOARD_TOUCH_SWAP_XY           (0)
++#define ESP_PANEL_BOARD_TOUCH_MIRROR_X          (0)
++#define ESP_PANEL_BOARD_TOUCH_MIRROR_Y          (0)
++
++#define ESP_PANEL_BOARD_TOUCH_RST_IO            (-1)
++#define ESP_PANEL_BOARD_TOUCH_RST_LEVEL         (0)
++#define ESP_PANEL_BOARD_TOUCH_INT_IO            (-1)
++#define ESP_PANEL_BOARD_TOUCH_INT_LEVEL         (0)
++
++#endif // ESP_PANEL_BOARD_USE_TOUCH
++
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++//////////////////////////// Backlight ////////////////////////////////////////////////////////////////////////////////
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++#define ESP_PANEL_BOARD_USE_BACKLIGHT           (1)
++
++#if ESP_PANEL_BOARD_USE_BACKLIGHT
++
++#define ESP_PANEL_BOARD_BACKLIGHT_TYPE          (ESP_PANEL_BACKLIGHT_TYPE_PWM_LEDC)
++
++#if (ESP_PANEL_BOARD_BACKLIGHT_TYPE == ESP_PANEL_BACKLIGHT_TYPE_SWITCH_GPIO) || \
++    (ESP_PANEL_BOARD_BACKLIGHT_TYPE == ESP_PANEL_BACKLIGHT_TYPE_SWITCH_EXPANDER) || \
++    (ESP_PANEL_BOARD_BACKLIGHT_TYPE == ESP_PANEL_BACKLIGHT_TYPE_PWM_LEDC)
++
++    #define ESP_PANEL_BOARD_BACKLIGHT_IO        (1)     // GPIO 1
++    #define ESP_PANEL_BOARD_BACKLIGHT_ON_LEVEL  (1)
++
++#endif
++
++#define ESP_PANEL_BOARD_BACKLIGHT_IDLE_OFF      (0)
++
++#endif // ESP_PANEL_BOARD_USE_BACKLIGHT
++
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++//////////////////////////// IO Expander //////////////////////////////////////////////////////////////////////////////
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++#define ESP_PANEL_BOARD_USE_EXPANDER            (0)
++
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++/////////////////////////////////////////////// File Version ///////////////////////////////////////////////////////////
++////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++#define ESP_PANEL_BOARD_CUSTOM_FILE_VERSION_MAJOR 1
++#define ESP_PANEL_BOARD_CUSTOM_FILE_VERSION_MINOR 0
++#define ESP_PANEL_BOARD_CUSTOM_FILE_VERSION_PATCH 0
++
++// *INDENT-ON*
+-- 
+2.53.0
+

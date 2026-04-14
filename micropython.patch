@@ -1,0 +1,60 @@
+diff --git a/ports/esp32/CMakeLists.txt b/ports/esp32/CMakeLists.txt
+index c739368c5..97a50fac7 100644
+--- a/ports/esp32/CMakeLists.txt
++++ b/ports/esp32/CMakeLists.txt
+@@ -59,6 +59,14 @@ endforeach()
+ configure_file(${CMAKE_BINARY_DIR}/sdkconfig.combined.in ${CMAKE_BINARY_DIR}/sdkconfig.combined COPYONLY)
+ set(SDKCONFIG_DEFAULTS ${CMAKE_BINARY_DIR}/sdkconfig.combined)
+ 
++# Add ESP32_Display_Panel and dependencies as extra IDF components.
++# Directory name = component name used by idf_component_register().
++list(APPEND EXTRA_COMPONENT_DIRS
++    /home/lpinard/Repos/ESP32_Display_Panel
++    /home/lpinard/Repos/esp-lib-utils
++    /home/lpinard/Repos/ESP32_IO_Expander
++)
++
+ # Include main IDF cmake file.
+ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+ 
+diff --git a/ports/esp32/boards/ESP32_GENERIC_S3/mpconfigvariant_SPIRAM_OCT.cmake b/ports/esp32/boards/ESP32_GENERIC_S3/mpconfigvariant_SPIRAM_OCT.cmake
+index 8b2eda272..2178b3813 100644
+--- a/ports/esp32/boards/ESP32_GENERIC_S3/mpconfigvariant_SPIRAM_OCT.cmake
++++ b/ports/esp32/boards/ESP32_GENERIC_S3/mpconfigvariant_SPIRAM_OCT.cmake
+@@ -2,6 +2,8 @@ set(SDKCONFIG_DEFAULTS
+     ${SDKCONFIG_DEFAULTS}
+     boards/sdkconfig.240mhz
+     boards/sdkconfig.spiram_oct
++    boards/ESP32_GENERIC_S3/sdkconfig.usb_console
++    boards/ESP32_GENERIC_S3/sdkconfig.esp_panel
+ )
+ 
+ list(APPEND MICROPY_DEF_BOARD
+diff --git a/ports/esp32/esp32_common.cmake b/ports/esp32/esp32_common.cmake
+index b71fc2437..ce0f54556 100644
+--- a/ports/esp32/esp32_common.cmake
++++ b/ports/esp32/esp32_common.cmake
+@@ -202,6 +202,13 @@ if($ENV{IDF_VERSION} VERSION_GREATER_EQUAL "5.4")
+         esp_driver_touch_sens)
+ endif()
+ 
++# ESP32_Display_Panel: added via EXTRA_COMPONENT_DIRS in top-level CMakeLists.txt
++list(APPEND IDF_COMPONENTS
++    ESP32_Display_Panel
++    esp-lib-utils
++    ESP32_IO_Expander
++)
++
+ # Provide the default LD fragment if not set
+ if (MICROPY_USER_LDFRAGMENTS)
+     set(MICROPY_LDFRAGMENTS ${MICROPY_USER_LDFRAGMENTS})
+diff --git a/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel b/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel
+new file mode 100644
+--- /dev/null
++++ b/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel
++# ESP32_Display_Panel configuration for JC3248W535EN (AXS15231B QSPI)
++# Unset FILE_SKIP flags so the .h conf files are used instead of Kconfig defaults.
++# IDF sdkconfig.defaults syntax: "# CONFIG_X is not set" disables a bool that defaults to y.
++# CONFIG_ESP_PANEL_DRIVERS_FILE_SKIP is not set
++# CONFIG_ESP_PANEL_BOARD_FILE_SKIP is not set
++# CONFIG_ESP_UTILS_CONF_FILE_SKIP is not set
