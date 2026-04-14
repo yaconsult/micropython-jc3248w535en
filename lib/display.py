@@ -35,8 +35,10 @@ class Display:
         self._board.init()
         self._board.begin()
 
-        self.width  = self._board.get_width()
-        self.height = self._board.get_height()
+        # Panel is 320x480 in firmware. Physical orientation is landscape (480 wide x 320 tall).
+        # TODO: fix MADCTL in firmware for portrait mode (needs reflash).
+        self.width  = self._board.get_width()    # 320
+        self.height = self._board.get_height()   # 480
 
         self.backlight = Backlight()
         self.backlight.set(brightness)
@@ -67,7 +69,7 @@ class Display:
     # ── Display update ────────────────────────────────────────────────────────
 
     def show(self):
-        """Flush full framebuffer to the display."""
+        """Flush framebuffer to display."""
         self.fb.flush(self._board)
 
     def show_region(self, x, y, w, h):
@@ -77,8 +79,15 @@ class Display:
     # ── Touch ─────────────────────────────────────────────────────────────────
 
     def touch(self):
-        """Return list of (x, y, strength) touch points, or []."""
-        return self._board.read_touch()
+        """Return list of (x, y, strength) touch points, or [].
+        Raw touch X,Y map directly to display X,Y on this board."""
+        raw = self._board.read_touch()
+        result = []
+        for pt in raw:
+            x = min(max(pt[0], 0), self.width - 1)
+            y = min(max(pt[1], 0), self.height - 1)
+            result.append((x, y, pt[2]))
+        return result
 
     # ── Raw board access ──────────────────────────────────────────────────────
 

@@ -46,8 +46,34 @@ class RGB565Buffer(framebuf.FrameBuffer):
         return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
 
     def flush(self, board):
-        """Push the entire framebuffer to the display."""
+        """Push the entire framebuffer to the display (no rotation)."""
         board.draw_bitmap(0, 0, self.width, self.height, self._buf)
+
+    def flush_rotated(self, board, panel_w, panel_h):
+        """Rotate framebuffer 90° CW and push to display.
+
+        Framebuffer (self): width=panel_h (e.g.480), height=panel_w (e.g.320) — portrait view.
+        Physical panel:     width=panel_w (e.g.320), height=panel_h (e.g.480) — landscape.
+
+        90° CW rotation:  dst_row = src_col,  dst_col = (fb_height-1 - src_row)
+        dst index = (src_x * panel_h + (fb_h - 1 - src_y)) * 2
+        """
+        fb_w = self.width    # portrait width  = panel_h (480)
+        fb_h = self.height   # portrait height = panel_w (320)
+        # 90° CW rotation: each src row becomes a dst column (right to left)
+        # dst row dst_x (0..fb_w-1) = src column src_x (=dst_x), reversed vertically
+        # dst[dst_x, :] = src[:, src_x] reversed  →  dst stride = panel_w = fb_h
+        out = bytearray(fb_w * fb_h * 2)
+        for src_x in range(fb_w):
+            # Extract column src_x from src (fb_h pixels), reversed
+            dst_row = src_x          # this column becomes dst row src_x
+            dst_base = dst_row * panel_w * 2   # start of dst row in bytes
+            for src_y in range(fb_h):
+                src_i = (src_y * fb_w + src_x) * 2
+                dst_i = dst_base + (fb_h - 1 - src_y) * 2
+                out[dst_i]     = self._buf[src_i]
+                out[dst_i + 1] = self._buf[src_i + 1]
+        board.draw_bitmap(0, 0, panel_w, panel_h, out)
 
     def flush_region(self, board, x, y, w, h):
         """Push a rectangular region to the display (minimal data transfer)."""
@@ -60,4 +86,4 @@ class RGB565Buffer(framebuf.FrameBuffer):
             dst_start = row * row_bytes
             region[dst_start:dst_start + row_bytes] = \
                 self._buf[src_start:src_start + row_bytes]
-        board.draw_bitmap(x, y, w, h, region)
+        board.draw_bitmap(x, y, w, h, region)  # region coords in board-native space
