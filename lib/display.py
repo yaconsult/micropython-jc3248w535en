@@ -35,8 +35,6 @@ class Display:
         self._board.init()
         self._board.begin()
 
-        # Panel is 320x480 in firmware. Physical orientation is landscape (480 wide x 320 tall).
-        # TODO: fix MADCTL in firmware for portrait mode (needs reflash).
         self.width  = self._board.get_width()    # 320
         self.height = self._board.get_height()   # 480
 

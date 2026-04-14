@@ -22,6 +22,19 @@ Usage:
 import framebuf
 
 
+class _Palette(framebuf.FrameBuffer):
+    """2-pixel RGB565 palette used by writer.py for color glyph blitting."""
+    def __init__(self):
+        self._buf = bytearray(4)
+        super().__init__(self._buf, 2, 1, framebuf.RGB565)
+
+    def fg(self, color):
+        self.pixel(1, 0, color)
+
+    def bg(self, color):
+        self.pixel(0, 0, color)
+
+
 class RGB565Buffer(framebuf.FrameBuffer):
     # Common colour constants (RGB565 big-endian, pre-swapped for draw_bitmap)
     BLACK   = 0x0000
@@ -39,6 +52,8 @@ class RGB565Buffer(framebuf.FrameBuffer):
         # 2 bytes per pixel; on SPIRAM builds this lands in PSRAM
         self._buf = bytearray(width * height * 2)
         super().__init__(self._buf, width, height, framebuf.RGB565)
+        # 2-pixel palette buffer required by writer.py for color blit
+        self.palette = _Palette()
 
     @staticmethod
     def color(r, g, b):
