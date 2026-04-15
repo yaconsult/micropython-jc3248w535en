@@ -10,16 +10,15 @@ The `d` object is then available in the REPL.
 """
 
 from display import Display
-from writer import Writer
-import fonts.sans24 as sans24
 
 d = Display(brightness=80)
 
 d.fb.fill(d.BLACK)
-wri24 = Writer(d.fb, sans24, verbose=False)
-Writer.set_textpos(d.fb, 10, 10)
-wri24.setcolor(d.YELLOW, d.BLACK)
-wri24.printstring('Hello')
+cx = (d.width - 13*8) // 2
+d.text('JC3248W535EN', cx, d.height//2 - 20, d.WHITE)
+d.text('MicroPython', (d.width - 11*8)//2, d.height//2, d.color(180, 220, 255))
+d.text('Ready.', (d.width - 6*8)//2, d.height//2 + 20, d.YELLOW)
 d.show()
 
-print('done')
+print('Display ready.')
+print('Run: exec(open("examples/font_demo.py").read())  # for custom fonts')
