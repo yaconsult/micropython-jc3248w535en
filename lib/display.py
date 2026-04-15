@@ -18,6 +18,9 @@ from esp_panel import Board
 from backlight import Backlight
 from framebuf_rgb565 import RGB565Buffer
 
+# Module-level singleton — survives soft resets (sys.modules is preserved)
+_display = None
+
 
 class Display:
     # Colour shortcuts delegated from RGB565Buffer
@@ -31,6 +34,17 @@ class Display:
     MAGENTA = RGB565Buffer.MAGENTA
 
     def __init__(self, brightness=80):
+        global _display
+        if _display is not None:
+            # Reuse already-initialised board — just update brightness
+            self._board    = _display._board
+            self.width     = _display.width
+            self.height    = _display.height
+            self.backlight = _display.backlight
+            self.fb        = _display.fb
+            self.backlight.set(brightness)
+            return
+
         self._board = Board()
         self._board.init()
         self._board.begin()
@@ -42,6 +56,7 @@ class Display:
         self.backlight.set(brightness)
 
         self.fb = RGB565Buffer(self.width, self.height)
+        _display = self
 
     # ── Drawing (delegate to framebuffer) ────────────────────────────────────
 
