@@ -514,6 +514,14 @@ index d0767dfba..57e5fed7b 100644
  
  // Optimisations
  #define MICROPY_OPT_COMPUTED_GOTO               (1)
+diff --git a/ports/esp32/.gitignore b/ports/esp32/.gitignore
+index 9c708bb85..67fee435a 100644
+--- a/ports/esp32/.gitignore
++++ b/ports/esp32/.gitignore
+@@ -1 +1,3 @@
+ managed_components/
++ports/esp32/lockfiles/dependencies.lock.*
++ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.usb_console
 diff --git a/ports/esp32/CMakeLists.txt b/ports/esp32/CMakeLists.txt
 index c739368c5..97a50fac7 100644
 --- a/ports/esp32/CMakeLists.txt
