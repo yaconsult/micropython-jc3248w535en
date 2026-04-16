@@ -1,3 +1,519 @@
+diff --git a/.gitattributes b/.gitattributes
+index fbab4e69a..c14a61b0d 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -14,7 +14,6 @@
+ *.dxf binary
+ *.mpy binary
+ *.der binary
+-*.bin binary
+ 
+ # These should also not be modified by git.
+ tests/basics/string_cr_conversion.py -text
+diff --git a/docs/develop/cmodules.rst b/docs/develop/cmodules.rst
+index ec20e65f4..c5aa919b7 100644
+--- a/docs/develop/cmodules.rst
++++ b/docs/develop/cmodules.rst
+@@ -8,8 +8,8 @@ limitations with the Python environment, often due to an inability to access
+ certain hardware resources or Python speed limitations.
+ 
+ If your limitations can't be resolved with suggestions in :ref:`speed_python`,
+-writing some or all of your module in C (and/or
+-:ref:`C++ if implemented for your port<cxx_support>`) is a viable option.
++writing some or all of your module in C (and/or C++ if implemented for your port)
++is a viable option.
+ 
+ If your module is designed to access or work with commonly available
+ hardware or libraries please consider implementing it inside the MicroPython
+@@ -285,73 +285,3 @@ can now be accessed in Python just like any other builtin module, e.g.
+     sleep_ms(1000)
+     print(watch.time())
+     # should display approximately 1000
+-
+-
+-.. _c_heap:
+-
+-C Dynamic Memory Allocation
+----------------------------
+-
+-MicroPython uses its own "Python heap" for `memorymanagement`,
+-which is not the same as the "C heap" used by C library functions ``malloc()``,
+-``free()``, etc. Not every MicroPython port comes with a "C heap" at all.
+-
+-Tier 1 & 2 ports have varying support for C dynamic memory allocation via a "C
+-heap":
+-
+-- unix, windows, esp32 and webassembly ports support C dynamic memory
+-  allocation.
+-- rp2 port will fail to allocate any memory at runtime unless the firmware is
+-  built with ``MICROPY_C_HEAP_SIZE=n`` to reserve ``n`` bytes of memory for a C
+-  heap. This memory will not be available for Python code to use.
+-- alif, mimxrt, nrf, renesas-ra, samd, and stm32 port builds that include
+-  dynamic C allocation will fail at link-time with errors such as ``undefined
+-  reference to `malloc'``. MicroPython has no built-in support for dynamic C
+-  allocation on these ports. Any solution requires manually adding a C heap
+-  implementation to the custom build.
+-- zephyr port currently does not support building with user modules.
+-
+-Python heap as C heap
+-~~~~~~~~~~~~~~~~~~~~~
+-
+-It may be practical for C code to call "Python heap" dynamic allocation
+-functions such ``m_malloc()``, ``m_malloc0()`` and ``m_free()`` instead.
+-
+-See `python_memory_from_c` for more information about this approach.
+-
+-.. _cxx_support:
+-
+-C++ Modules
+------------
+-
+-Most Tier 1 & 2 MicroPython ports (and some Tier 3) support building C++ user
+-modules, using the C++-specific environment variables described above.
+-
+-Integrating C++ and MicroPython successfully involves some additional
+-considerations:
+-
+-C++ Dynamic Memory Allocation
+-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-
+-C++ programs (as well as C++ Standard Library features) typically use dynamic
+-memory allocation. The C++ default memory allocator (i.e. operators ``new`` and
+-``delete``) is typically implemented as a layer on top of `c_heap`.
+-
+-For MicroPython ports which don't include C dynamic memory allocation support,
+-C++ dynamic memory allocation can be supported in one of two ways:
+-
+-- Implement C dynamic memory allocation in your custom build.
+-- Implement a custom C++ allocator in your custom build.
+-
+-Linkage Considerations
+-~~~~~~~~~~~~~~~~~~~~~~
+-
+-Because MicroPython is a C-based project, any symbols which link to or from
+-MicroPython need to be qualified ``extern "C"`` in C++ code.
+-
+-It's strongly recommended to follow the pattern demonstrated in
+-`examples/usercmodule/cppexample
+-<https://github.com/micropython/micropython/blob/master/examples/usercmodule/cppexample>`_,
+-where the Python module is implemented in a minimal C file wrapper around the
+-C++ code.
+-
+diff --git a/docs/develop/library.rst b/docs/develop/library.rst
+index 6ff9bfe02..830211d81 100644
+--- a/docs/develop/library.rst
++++ b/docs/develop/library.rst
+@@ -26,9 +26,15 @@ Implementing a core module
+ --------------------------
+ 
+ Like CPython, MicroPython has core builtin modules that can be accessed through import statements.
+-An example is the :mod:`gc` module discussed in :ref:`memorymanagement`.
++An example is the ``gc`` module discussed in :ref:`memorymanagement`.
+ 
+-MicroPython has several other builtin standard/core modules like :mod:`io`, :mod:`array`, etc.
++.. code-block:: bash
++
++   >>> import gc
++   >>> gc.enable()
++   >>>
++
++MicroPython has several other builtin standard/core modules like ``io``, ``array`` etc.
+ Adding a new core module involves several modifications.
+ 
+ First, create the ``C`` file in the ``py/`` directory. In this example we are adding a
+diff --git a/docs/develop/memorymgt.rst b/docs/develop/memorymgt.rst
+index 4ae801200..5b1690cc8 100644
+--- a/docs/develop/memorymgt.rst
++++ b/docs/develop/memorymgt.rst
+@@ -4,80 +4,43 @@ Memory Management
+ =================
+ 
+ Unlike programming languages such as C/C++, MicroPython hides memory management
+-details from the developer by supporting automatic memory management of a
+-":ref:`Python heap<heap>`" that holds all Python objects. MicroPython uses
+-garbage collection (GC) for automatic memory management. The garbage collector
+-is responsible for freeing memory which is no longer in use.
+-
+-Specifically, MicroPython uses a `Mark and Sweep
+-<https://en.wikipedia.org/wiki/Tracing_garbage_collection#Basic_algorithm>`_
+-garbage collection algorithm. This algorithm has a mark phase that scans the
+-heap marking all live objects, and then a sweep phase goes through the heap
+-reclaiming all unmarked objects.
+-
+-The MicroPython garbage collector is by default automatic, but manual control is
+-available through the :mod:`gc` built-in module.
+-
+-.. _python_memory_from_c:
+-
+-MicroPython Memory from C code
+-------------------------------
+-
+-Awareness of the garbage collector is needed when writing C code that allocates
+-memory from the "Python heap" (i.e. functions ``m_malloc()``, ``m_malloc0()``,
+-``m_free()``, etc).
+-
+-The mark phase of the garbage collector scans for live pointers to heap memory
+-starting from the following roots:
+-
+-- The stack of the main Python runtime (or REPL).
+-- The stacks of each "Python thread", for ports which implement Python threads
+-  on top of native operating system threads or tasks.
+-- The "root pointers" defined in C code using the macro
+-  ``MP_REGISTER_ROOT_POINTER``. These are the recommended way to have statically
+-  scoped pointers to the Python heap.
+-- Tracked allocations made with the ``m_tracked_calloc()``, ``m_tracked_realloc``
+-  and ``m_tracked_free()`` functions. These special functions allow allocating a
+-  block of memory which is always considered live by the garbage collector.
+-  Similar to memory allocation in C, this memory is only freed by calling
+-  ``m_tracked_free()`` or by soft reset. There is a small memory usage and
+-  runtime overhead to each tracked allocation. This feature is not enabled by
+-  default on all ports.
+-
+-The garbage collector then recursively scans and marks all the memory pointed to
+-by the root pointers, until all addresses are exhausted. This is sufficient to
+-find all Python objects that are still in use by the MicroPython runtime.
+-
+-However, the following memory will **not** be scanned by the garbage collector
+-and could be freed prematurely:
+-
+-- Static or global C variables which contain pointers to heap memory.
+-- Pointers which don't point to the "head" of an allocated buffer (i.e. to the
+-  exact address returned by ``m_malloc()``), but instead to an address inside
+-  the allocated buffer (for example, a pointer to a nested struct). For
+-  performance reasons, the garbage collector doesn't mark the enclosing buffer
+-  in these cases.
+-- The stack of any thread or RTOS task which isn't running Python code or
+-  manually registered as a "Python thread" (for ports which support native
+-  threads or tasks).
+-
+-Ways to avoid use-after-free in these scenarios:
+-
+-- Use the tracked allocation API ``m_tracked_calloc()``, ``m_tracked_realloc()``
+-  and ``m_tracked_free()``.
+-- Register a root pointer (see above), instead of storing a pointer in a static
+-  variable.
+-- Restructure the code, for example by having an API where Python code
+-  initialises a singleton Python object (implemented in C) which holds all of the
+-  relevant pointers instead of having them in static variables.
+-
+-.. note:: :ref:`soft_reset` always clears the Python heap and frees all memory.
+-          It's important not to hold any pointers to the heap after a soft
+-          reset, as they will become dangling pointers to freed memory.
+-
+-          Some ports support a "C heap" as well (see `c_heap`), in which case
+-          you can allocate memory that will stay valid over soft reset by
+-          calling standard C functions ``malloc``, etc.
++details from the developer by supporting automatic memory management.
++Automatic memory management is a technique used by operating systems or applications to automatically manage
++the allocation and deallocation of memory. This eliminates challenges such as forgetting to
++free the memory allocated to an object. Automatic memory management also avoids the critical issue of using memory
++that is already released. Automatic memory management takes many forms, one of them being
++garbage collection (GC).
++
++The garbage collector usually has two responsibilities;
++
++#. Allocate new objects in available memory.
++#. Free unused memory.
++
++There are many GC algorithms but MicroPython uses the
++`Mark and Sweep <https://en.wikipedia.org/wiki/Tracing_garbage_collection#Basic_algorithm>`_
++policy for managing memory. This algorithm has a mark phase that traverses the heap marking all
++live objects while the sweep phase goes through the heap reclaiming all unmarked objects.
++
++Garbage collection functionality in MicroPython is available through the ``gc`` built-in
++module:
++
++.. code-block:: bash
++
++   >>> x = 5
++   >>> x
++   5
++   >>> import gc
++   >>> gc.enable()
++   >>> gc.mem_alloc()
++   1312
++   >>> gc.mem_free()
++   2071392
++   >>> gc.collect()
++   19
++   >>> gc.disable()
++   >>>
++
++Even when ``gc.disable()`` is invoked, collection can be triggered with ``gc.collect()``.
+ 
+ The object model
+ ----------------
+diff --git a/docs/library/gc.rst b/docs/library/gc.rst
+index 919f82ed5..2ba204e22 100644
+--- a/docs/library/gc.rst
++++ b/docs/library/gc.rst
+@@ -2,8 +2,7 @@
+ ==========================================
+ 
+ .. module:: gc
+-   :synopsis: control the garbage collector which automatically frees
+-              :ref:`heap memory <heap>`
++   :synopsis: control the garbage collector
+ 
+ |see_cpython_module| :mod:`python:gc`.
+ 
+@@ -19,10 +18,6 @@ Functions
+    Disable automatic garbage collection.  Heap memory can still be allocated,
+    and garbage collection can still be initiated manually using :meth:`gc.collect`.
+ 
+-.. function:: isenabled()
+-
+-   Returns True if automatic garbage collection is enabled, and False otherwise.
+-
+ .. function:: collect()
+ 
+    Run a garbage collection.
+@@ -69,40 +64,3 @@ Functions
+       This function is a MicroPython extension. CPython has a similar
+       function - ``set_threshold()``, but due to different GC
+       implementations, its signature and semantics are different.
+-
+-   Examples
+-   ^^^^^^^^
+-
+-   To trigger a garbage collection each time 32768 bytes of RAM have been allocated in total::
+-
+-       gc.threshold(32768)
+-
+-   To restore the default behaviour, only triggering garbage collection when out of memory::
+-
+-       gc.threshold(-1)
+-
+-Example
+--------
+-
+-.. code-block:: bash
+-
+-    >>> import gc
+-    >>> gc.mem_free() # Gets number of bytes free in memory
+-    8192
+-    >>> gc.mem_alloc() # Gets number of bytes allocated in memory
+-    1024
+-    >>> foo = bytearray(1000) # Create a big array of data
+-    >>> gc.mem_free() # Show that there's less memory available
+-    7168
+-    >>> gc.mem_alloc() # Show that there's more memory used
+-    2048
+-    >>> del foo # Delete the object
+-    >>> gc.mem_free() # Show that collection hasn't run yet
+-    7168
+-    >>> gc.mem_alloc() # That memory is still allocated
+-    2048
+-    >>> gc.collect() # Manually run the collection
+-    >>> gc.mem_free() # Now we have reclaimed that memory
+-    8192
+-    >>> gc.mem_alloc() # That memory is no longer allocated
+-    1024
+diff --git a/docs/library/machine.Pin.rst b/docs/library/machine.Pin.rst
+index 37dcac877..d419c7ac2 100644
+--- a/docs/library/machine.Pin.rst
++++ b/docs/library/machine.Pin.rst
+@@ -301,22 +301,11 @@ not all constants are available on all ports.
+ 
+ .. data:: Pin.PULL_UP
+           Pin.PULL_DOWN
++          Pin.PULL_HOLD
+ 
+    Selects whether there is a pull up/down resistor.  Use the value
+    ``None`` for no pull.
+ 
+-   Some ports have a different constants set that can be used to select
+-   hardware-specific behaviour:
+-
+-   - The esp8266 port does not have pull-down resistors on GPIO pins, hence
+-     ``Pin.PULL_DOWN`` is not supported.
+-   - The mimxrt port has several extra constants to enable different pull
+-     modes: ``Pin.PULL_UP_22K`` enables a 22KΩ pull-up on the pin,
+-     ``Pin.PULL_UP_47K`` enables a 47KΩ pull-up on the pin, and
+-     ``Pin.PULL_HOLD`` that puts the pin into high-impedance mode.  The
+-     ``Pin.PULL_UP`` and ``Pin.PULL_DOWN`` constants will use a 100KΩ internal
+-     resistor.
+-
+ .. data:: Pin.DRIVE_0
+           Pin.DRIVE_1
+           Pin.DRIVE_2
+diff --git a/docs/library/machine.USBDevice.rst b/docs/library/machine.USBDevice.rst
+index 45f9e9cef..5291679ac 100644
+--- a/docs/library/machine.USBDevice.rst
++++ b/docs/library/machine.USBDevice.rst
+@@ -155,11 +155,10 @@ Methods
+       The callback has three arguments:
+ 
+       1. The Endpoint number for the completed transfer.
+-      2. Result value. This is an integer which is ``0`` (`XFER_SUCCESS`) on
+-         success, or one of the non-zero values `XFER_FAILED` or `XFER_STALLED`
+-         if the transfer failed.
+-      3. Number of bytes successfully transferred. In the case of a "short"
+-         transfer, the result is ``0`` (`XFER_SUCCESS`) and ``xferred_bytes``
++      2. Result value: ``True`` if the transfer succeeded, ``False``
++         otherwise.
++      3. Number of bytes successfully transferred. In the case of a
++         "short" transfer, The result is ``True`` and ``xferred_bytes``
+          will be smaller than the length of the buffer submitted for the
+          transfer.
+ 
+@@ -302,20 +301,4 @@ Constants
+           - ``desc_cfg`` - ``bytes`` object containing the complete built-in USB
+             configuration descriptor.
+ 
+-.. data:: USBDevice.XFER_SUCCESS
+-.. data:: USBDevice.XFER_FAILED
+-.. data:: USBDevice.XFER_STALLED
+-
+-          These are integer constants that represent the possible transfer
+-          result values passed to the ``xfer_cb`` callback (see
+-          `USBDevice.config`).
+-
+-          - ``XFER_SUCCESS`` has value ``0`` and indicates the transfer was
+-            successful.
+-          - ``XFER_FAILED`` indicates the transfer failed due to low-level
+-            integrity errors.
+-          - ``XFER_STALLED`` indicates that the host has stalled this endpoint.
+-
+-          All failure values are non-zero integers.
+-
+ .. _usb driver modules in micropython-lib: https://github.com/micropython/micropython-lib/tree/master/micropython/usb#readme
+diff --git a/docs/library/micropython.rst b/docs/library/micropython.rst
+index 65fa20431..2da9a6e3f 100644
+--- a/docs/library/micropython.rst
++++ b/docs/library/micropython.rst
+@@ -62,33 +62,8 @@ Functions
+    is given then extra information is printed.
+ 
+    The information that is printed is implementation dependent, but currently
+-   includes the amount of stack and heap used. In verbose mode it prints out a
+-   summary of the entire heap indicating which blocks are used and which are
+-   free.
+-
+-   The exact output of verbose mode varies between ports, but in general each
+-   letter represents a single 16 byte block of memory. Each line of
+-   output represents 0x400 bytes or 1KiB of RAM.
+-
+-   The meaning of each letter:
+-
+-   ====== =================
+-   Symbol Meaning
+-   ====== =================
+-       .   free block
+-       h   head block
+-       =   tail block
+-       m   marked head block
+-       T   tuple
+-       L   list
+-       D   dict
+-       F   float
+-       B   byte code
+-       M   module
+-       S   string or bytes
+-       A   bytearray
+-   ====== =================
+-
++   includes the amount of stack and heap used.  In verbose mode it prints out
++   the entire heap indicating which blocks are used and which are free.
+ 
+ .. function:: qstr_info([verbose])
+ 
+diff --git a/docs/reference/constrained.rst b/docs/reference/constrained.rst
+index 616dc8833..d9a349aa6 100644
+--- a/docs/reference/constrained.rst
++++ b/docs/reference/constrained.rst
+@@ -316,12 +316,6 @@ following periodically:
+     gc.collect()
+     gc.threshold(gc.mem_free() // 4 + gc.mem_alloc())
+ 
+-For more information, see below and the documentation for built-in module
+-:mod:`gc`.
+-
+-For details from MicroPython internals/developer perspective, see also
+-:doc:`/develop/memorymgt`.
+-
+ Fragmentation
+ ~~~~~~~~~~~~~
+ 
+@@ -382,8 +376,28 @@ Running the function uses over 10KiB, but on return ``a`` is garbage because it
+ is out of scope and cannot be referenced. The final `gc.collect()` recovers
+ that memory.
+ 
+-The verbose output from ``micropython.mem_info(1)`` is documented at
+-`micropython.mem_info()`.
++The final output produced by ``micropython.mem_info(1)`` will vary in detail but
++may be interpreted as follows:
++
++====== =================
++Symbol Meaning
++====== =================
++   .   free block
++   h   head block
++   =   tail block
++   m   marked head block
++   T   tuple
++   L   list
++   D   dict
++   F   float
++   B   byte code
++   M   module
++   S   string or bytes
++   A   bytearray
++====== =================
++
++Each letter represents a single block of memory, a block being 16 bytes. So each
++line of the heap dump represents 0x400 bytes or 1KiB of RAM.
+ 
+ Control of garbage collection
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+diff --git a/extmod/machine_usb_device.c b/extmod/machine_usb_device.c
+index f6e97f420..3d4cde942 100644
+--- a/extmod/machine_usb_device.c
++++ b/extmod/machine_usb_device.c
+@@ -302,16 +302,6 @@ static const mp_rom_map_elem_t usb_device_locals_dict_table[] = {
+     { MP_ROM_QSTR(MP_QSTR_BUILTIN_CDC_MSC), MP_ROM_PTR(&mp_type_usb_device_builtin_default) },
+     #endif
+     #endif // !HAS_BUILTIN_DRIVERS
+-
+-    // xfer_cb result values
+-    // These are a subset of tusb_xfer_result_t
+-    { MP_ROM_QSTR(MP_QSTR_XFER_SUCCESS), MP_OBJ_NEW_SMALL_INT(XFER_RESULT_SUCCESS) },
+-    { MP_ROM_QSTR(MP_QSTR_XFER_FAILED), MP_OBJ_NEW_SMALL_INT(XFER_RESULT_FAILED) },
+-    { MP_ROM_QSTR(MP_QSTR_XFER_STALLED), MP_OBJ_NEW_SMALL_INT(XFER_RESULT_STALLED) },
+-    // Some values of tusb_xfer_result_t are not exposed here:
+-    // - XFER_RESULT_TIMEOUT only appears if you call the "sync" API subset, or in one
+-    //   case from the samd host controller.
+-    // - XFER_RESULT_INVALID only appears in the host controller APIs
+ };
+ static MP_DEFINE_CONST_DICT(usb_device_locals_dict, usb_device_locals_dict_table);
+ 
+diff --git a/lib/re1.5/compilecode.c b/lib/re1.5/compilecode.c
+index fade45324..513a15597 100644
+--- a/lib/re1.5/compilecode.c
++++ b/lib/re1.5/compilecode.c
+@@ -29,8 +29,6 @@ static const char *_compilecode(const char *re, ByteProg *prog, int sizecode)
+     int term = PC;
+     int alt_label = 0;
+ 
+-    re1_5_stack_chk();
+-
+     for (; *re && *re != ')'; re++) {
+         switch (*re) {
+         case '\\':
+diff --git a/ports/alif/mpconfigport.h b/ports/alif/mpconfigport.h
+index d0767dfba..57e5fed7b 100644
+--- a/ports/alif/mpconfigport.h
++++ b/ports/alif/mpconfigport.h
+@@ -87,7 +87,9 @@
+ // MicroPython emitters
+ #define MICROPY_PERSISTENT_CODE_LOAD            (1)
+ #define MICROPY_EMIT_THUMB                      (1)
++#define MICROPY_EMIT_THUMB_ARMV7M               (1)
+ #define MICROPY_EMIT_INLINE_THUMB               (1)
++#define MICROPY_EMIT_INLINE_THUMB_FLOAT         (1)
+ 
+ // Optimisations
+ #define MICROPY_OPT_COMPUTED_GOTO               (1)
 diff --git a/ports/esp32/CMakeLists.txt b/ports/esp32/CMakeLists.txt
 index c739368c5..97a50fac7 100644
 --- a/ports/esp32/CMakeLists.txt
@@ -30,6 +546,18 @@ index 8b2eda272..2178b3813 100644
  )
  
  list(APPEND MICROPY_DEF_BOARD
+diff --git a/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel b/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel
+new file mode 100644
+index 000000000..8c43c1978
+--- /dev/null
++++ b/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel
+@@ -0,0 +1,6 @@
++# ESP32_Display_Panel configuration for JC3248W535EN (AXS15231B QSPI)
++# Unset FILE_SKIP flags so the .h conf files are used instead of Kconfig defaults.
++# IDF sdkconfig.defaults syntax: "# CONFIG_X is not set" disables a bool that defaults to y.
++# CONFIG_ESP_PANEL_DRIVERS_FILE_SKIP is not set
++# CONFIG_ESP_PANEL_BOARD_FILE_SKIP is not set
++# CONFIG_ESP_UTILS_CONF_FILE_SKIP is not set
 diff --git a/ports/esp32/esp32_common.cmake b/ports/esp32/esp32_common.cmake
 index b71fc2437..ce0f54556 100644
 --- a/ports/esp32/esp32_common.cmake
@@ -48,13 +576,1398 @@ index b71fc2437..ce0f54556 100644
  # Provide the default LD fragment if not set
  if (MICROPY_USER_LDFRAGMENTS)
      set(MICROPY_LDFRAGMENTS ${MICROPY_USER_LDFRAGMENTS})
-diff --git a/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel b/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel
+diff --git a/ports/esp32/modules/machine.py b/ports/esp32/modules/machine.py
+index 9a7240b3f..9cfda12f1 100644
+--- a/ports/esp32/modules/machine.py
++++ b/ports/esp32/modules/machine.py
+@@ -3,7 +3,7 @@ import sys
+ _path = sys.path
+ sys.path = ()
+ try:
+-    from machine import *
++    import machine as _machine
+ finally:
+     sys.path = _path
+     del _path
+@@ -185,3 +185,8 @@ if hasattr(esp32, "PCNT"):
+ 
+ 
+ del esp32
++
++
++# Delegate to built-in machine module.
++def __getattr__(attr):
++    return getattr(_machine, attr)
+diff --git a/ports/esp8266/Makefile b/ports/esp8266/Makefile
+index b961c76fd..a0d4d769d 100644
+--- a/ports/esp8266/Makefile
++++ b/ports/esp8266/Makefile
+@@ -107,6 +107,9 @@ COPT += -Os -DNDEBUG
+ LDFLAGS += --gc-sections
+ endif
+ 
++# Flags for optional C++ source code
++CXXFLAGS += $(filter-out -Wmissing-prototypes -Wold-style-definition -std=gnu99,$(CFLAGS))
++
+ # Options for mpy-cross
+ MPY_CROSS_FLAGS += -march=xtensa
+ 
+diff --git a/ports/mimxrt/Makefile b/ports/mimxrt/Makefile
+index a57ff68a4..03a07627b 100644
+--- a/ports/mimxrt/Makefile
++++ b/ports/mimxrt/Makefile
+@@ -396,7 +396,7 @@ hal/resethandler_MIMXRT10xx.S: $(GEN_FLEXRAM_CONFIG_SRC)
+ # =============================================================================
+ 
+ # List of sources for qstr extraction
+-SRC_QSTR += $(SRC_C) $(SHARED_SRC_C) $(SRC_CXX) $(GEN_PINS_SRC)
++SRC_QSTR += $(SRC_C) $(SHARED_SRC_C) $(GEN_PINS_SRC)
+ 
+ # =============================================================================
+ # Compiler Flags
+@@ -448,6 +448,15 @@ CFLAGS += \
+ 	-Wfloat-conversion \
+ 	-Wno-error=unused-parameter
+ 
++# Flags for optional C++ source code
++CXXFLAGS += $(filter-out -std=c99,$(CFLAGS))
++
++# TODO make this common -- shouldn't be using these "private" vars from py.mk
++ifneq ($(SRC_CXX)$(SRC_USERMOD_CXX)$(SRC_USERMOD_LIB_CXX),)
++LIBSTDCPP_FILE_NAME = "$(shell $(CXX) $(CXXFLAGS) -print-file-name=libstdc++.a)"
++LDFLAGS += -L"$(shell dirname $(LIBSTDCPP_FILE_NAME))"
++endif
++
+ # Configure respective board flash type
+ # Add hal/flexspi_nor_flash.h or hal/flexspi_hyper_flash.h respectively
+ CFLAGS += -DBOARD_FLASH_OPS_HEADER_H=\"hal/flexspi_$(subst qspi_,,$(FLEXSPI_FLASH_TYPE)).h\"
+@@ -538,7 +547,6 @@ LIBS = $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
+ OBJ += $(PY_O)
+ OBJ += $(addprefix $(BUILD)/, $(LIBM_SRC_C:.c=.o))
+ OBJ += $(addprefix $(BUILD)/, $(SRC_C:.c=.o))
+-OBJ += $(addprefix $(BUILD)/, $(SRC_CXX:.cpp=.o))
+ OBJ += $(addprefix $(BUILD)/, $(SHARED_SRC_C:.c=.o))
+ OBJ += $(addprefix $(BUILD)/, $(DRIVERS_SRC_C:.c=.o))
+ OBJ += $(addprefix $(BUILD)/, $(SRC_S:.s=.o))
+diff --git a/ports/mimxrt/main.c b/ports/mimxrt/main.c
+index d8ccd1e97..664d1c4c1 100644
+--- a/ports/mimxrt/main.c
++++ b/ports/mimxrt/main.c
+@@ -217,11 +217,6 @@ void nlr_jump_fail(void *val) {
+     }
+ }
+ 
+-void abort(void) {
+-    for (;;) {
+-    }
+-}
+-
+ #ifndef NDEBUG
+ void MP_WEAK __assert_func(const char *file, int line, const char *func, const char *expr) {
+     mp_printf(MP_PYTHON_PRINTER, "Assertion '%s' failed, at file %s:%d\n", expr, file, line);
+diff --git a/ports/minimal/Makefile b/ports/minimal/Makefile
+index 65ef85647..bb05798ea 100644
+--- a/ports/minimal/Makefile
++++ b/ports/minimal/Makefile
+@@ -47,6 +47,9 @@ CFLAGS += -Os -DNDEBUG
+ CFLAGS += -fdata-sections -ffunction-sections
+ endif
+ 
++# Flags for optional C++ source code
++CXXFLAGS += $(filter-out -std=c99,$(CFLAGS))
++
+ LIBS =
+ 
+ SRC_C = \
+@@ -74,7 +77,7 @@ else
+ all: $(BUILD)/firmware.elf
+ endif
+ 
+-$(BUILD)/_frozen_mpy.c: $(TOP)/tests/assets/frozentest.mpy $(BUILD)/genhdr/qstrdefs.generated.h
++$(BUILD)/_frozen_mpy.c: $(TOP)/tests/frozen/frozentest.mpy $(BUILD)/genhdr/qstrdefs.generated.h
+ 	$(ECHO) "MISC freezing bytecode"
+ 	$(Q)$(TOP)/tools/mpy-tool.py -f -q $(BUILD)/genhdr/qstrdefs.preprocessed.h -mlongint-impl=none $< > $@
+ 
+diff --git a/ports/nrf/Makefile b/ports/nrf/Makefile
+index d35eeed47..a5304763d 100644
+--- a/ports/nrf/Makefile
++++ b/ports/nrf/Makefile
+@@ -139,7 +139,7 @@ LDFLAGS += -Wl,--gc-sections
+ endif
+ 
+ CFLAGS += $(CFLAGS_MCU_$(MCU_SERIES))
+-CFLAGS += $(INC) -Wall -Werror -std=c11 $(COPT) $(NRF_DEFINES) $(CFLAGS_EXTRA)
++CFLAGS += $(INC) -Wall -Werror -ansi -std=c11 $(COPT) $(NRF_DEFINES) $(CFLAGS_EXTRA)
+ CFLAGS += -fno-strict-aliasing
+ CFLAGS += -I$(BOARD_DIR)
+ CFLAGS += -DNRF5_HAL_H='<$(MCU_VARIANT)_hal.h>'
+diff --git a/ports/powerpc/Makefile b/ports/powerpc/Makefile
+index cc39040e4..949980f54 100644
+--- a/ports/powerpc/Makefile
++++ b/ports/powerpc/Makefile
+@@ -50,7 +50,7 @@ OBJ += $(BUILD)/head.o
+ 
+ all: $(BUILD)/firmware.elf $(BUILD)/firmware.map $(BUILD)/firmware.bin
+ 
+-$(BUILD)/_frozen_mpy.c: $(TOP)/tests/assets/frozentest.mpy $(BUILD)/genhdr/qstrdefs.generated.h
++$(BUILD)/_frozen_mpy.c: $(TOP)/tests/frozen/frozentest.mpy $(BUILD)/genhdr/qstrdefs.generated.h
+ 	$(ECHO) "MISC freezing bytecode"
+ 	$(Q)$(MPY_TOOL) -f -q $(BUILD)/genhdr/qstrdefs.preprocessed.h -mlongint-impl=mpz $< > $@
+ 
+diff --git a/ports/qemu/Makefile b/ports/qemu/Makefile
+index 16a53f523..380355dbe 100644
+--- a/ports/qemu/Makefile
++++ b/ports/qemu/Makefile
+@@ -64,18 +64,6 @@ else ifeq ($(SUPPORTS_HARDWARE_FP_DOUBLE),1)
+ CFLAGS += -DMICROPY_HW_FPU=1
+ endif
+ 
+-ifneq ($(MICROPY_HW_ROMFS_PART0_START),)
+-CFLAGS += -DMICROPY_HW_ROMFS_ENABLE_PART0=1
+-CFLAGS += -DMICROPY_HW_ROMFS_PART0_START=$(MICROPY_HW_ROMFS_PART0_START)
+-CFLAGS += -DMICROPY_HW_ROMFS_PART0_SIZE=$(MICROPY_HW_ROMFS_PART0_SIZE)
+-endif
+-
+-ifneq ($(MICROPY_HW_ROMFS_PART1_START),)
+-CFLAGS += -DMICROPY_HW_ROMFS_ENABLE_PART1=1
+-CFLAGS += -DMICROPY_HW_ROMFS_PART1_START=$(MICROPY_HW_ROMFS_PART1_START)
+-CFLAGS += -DMICROPY_HW_ROMFS_PART1_SIZE=$(MICROPY_HW_ROMFS_PART1_SIZE)
+-endif
+-
+ ################################################################################
+ # ARM specific settings
+ 
+@@ -220,16 +208,6 @@ CFLAGS += $(SPECS_FRAGMENT)
+ LDFLAGS += $(SPECS_FRAGMENT)
+ endif
+ 
+-# Mount the ROMFS test image only if no other ROMFS partition has been mounted on slot 0.
+-
+-ROMFS_TEST_IMAGE = assets/random_romfs.bin
+-
+-ifneq ($(MICROPY_HW_ROMFS_PART0_START),)
+-ifeq ($(QEMU_ROMFS_IMG0),)
+-QEMU_ARGS += -device loader,file=$(ROMFS_TEST_IMAGE),addr=$(MICROPY_HW_ROMFS_PART0_START),force-raw=on
+-endif
+-endif
+-
+ RUN_TESTS_FULL_ARGS = -t execpty:"$(QEMU_SYSTEM) $(QEMU_ARGS) -serial pty -kernel ../ports/qemu/$<" $(RUN_TESTS_ARGS)
+ 
+ ################################################################################
+diff --git a/ports/qemu/boards/MPS2_AN385/mpconfigboard.mk b/ports/qemu/boards/MPS2_AN385/mpconfigboard.mk
+index 53b6aec3d..182d076eb 100644
+--- a/ports/qemu/boards/MPS2_AN385/mpconfigboard.mk
++++ b/ports/qemu/boards/MPS2_AN385/mpconfigboard.mk
+@@ -5,9 +5,6 @@ CFLAGS += -mthumb -mcpu=cortex-m3 -mfloat-abi=soft
+ CFLAGS += -DQEMU_SOC_MPS2
+ CFLAGS += -DMICROPY_HW_MCU_NAME='"Cortex-M3"'
+ 
+-MICROPY_HW_ROMFS_PART0_START = 0x21000000
+-MICROPY_HW_ROMFS_PART0_SIZE = 0x00400000
+-
+ LDSCRIPT = mcu/arm/mps2.ld
+ 
+ SRC_BOARD_O = shared/runtime/gchelper_native.o shared/runtime/gchelper_thumb2.o
+diff --git a/ports/qemu/boards/MPS2_AN500/mpconfigboard.mk b/ports/qemu/boards/MPS2_AN500/mpconfigboard.mk
+index 2b78149de..725ffbc89 100644
+--- a/ports/qemu/boards/MPS2_AN500/mpconfigboard.mk
++++ b/ports/qemu/boards/MPS2_AN500/mpconfigboard.mk
+@@ -7,6 +7,9 @@ CFLAGS += -DMICROPY_HW_MCU_NAME='"Cortex-M7"'
+ 
+ MICROPY_HW_ROMFS_PART0_START = 0x60C00000
+ MICROPY_HW_ROMFS_PART0_SIZE = 0x00400000
++CFLAGS += -DMICROPY_HW_ROMFS_ENABLE_PART0=1
++CFLAGS += -DMICROPY_HW_ROMFS_PART0_START=$(MICROPY_HW_ROMFS_PART0_START)
++CFLAGS += -DMICROPY_HW_ROMFS_PART0_SIZE=$(MICROPY_HW_ROMFS_PART0_SIZE)
+ 
+ LDSCRIPT = mcu/arm/mps2.ld
+ 
+diff --git a/ports/qemu/boards/MPS3_AN547/mpconfigboard.mk b/ports/qemu/boards/MPS3_AN547/mpconfigboard.mk
+index 7469f0408..fea9c3d5d 100644
+--- a/ports/qemu/boards/MPS3_AN547/mpconfigboard.mk
++++ b/ports/qemu/boards/MPS3_AN547/mpconfigboard.mk
+@@ -8,6 +8,9 @@ CFLAGS += -DCPU_FREQ_HZ=32000000
+ 
+ MICROPY_HW_ROMFS_PART0_START ?= 0x62000000
+ MICROPY_HW_ROMFS_PART0_SIZE ?= 0x02000000
++CFLAGS += -DMICROPY_HW_ROMFS_ENABLE_PART0=1
++CFLAGS += -DMICROPY_HW_ROMFS_PART0_START=$(MICROPY_HW_ROMFS_PART0_START)
++CFLAGS += -DMICROPY_HW_ROMFS_PART0_SIZE=$(MICROPY_HW_ROMFS_PART0_SIZE)
+ 
+ LDSCRIPT = mcu/arm/mps3.ld
+ 
+diff --git a/ports/qemu/boards/SABRELITE/mpconfigboard.mk b/ports/qemu/boards/SABRELITE/mpconfigboard.mk
+index f46559dec..e56dba712 100644
+--- a/ports/qemu/boards/SABRELITE/mpconfigboard.mk
++++ b/ports/qemu/boards/SABRELITE/mpconfigboard.mk
+@@ -8,12 +8,6 @@ CFLAGS += -DMICROPY_HW_MCU_NAME='"Cortex-A9"'
+ # Cortex-A9 should support unaligned-access, but qemu doesn't seem to.
+ CFLAGS += -mno-unaligned-access
+ 
+-# If the ROMFS partition size is not enough, remember to change
+-# ports/qemu/mcu/arm/imx6.ld to resize the ROMFS section as well.
+-
+-MICROPY_HW_ROMFS_PART0_START = 0x17C00000
+-MICROPY_HW_ROMFS_PART0_SIZE = 0x00400000
+-
+ LDSCRIPT = mcu/arm/imx6.ld
+ 
+ SRC_BOARD_O = shared/runtime/gchelper_generic.o
+diff --git a/ports/qemu/boards/VIRT_RV32/mpconfigboard.mk b/ports/qemu/boards/VIRT_RV32/mpconfigboard.mk
+index e38991aa3..6a3b94a98 100644
+--- a/ports/qemu/boards/VIRT_RV32/mpconfigboard.mk
++++ b/ports/qemu/boards/VIRT_RV32/mpconfigboard.mk
+@@ -6,12 +6,6 @@ CFLAGS += -DMICROPY_HW_MCU_NAME='"$(RV32_ARCH)"'
+ 
+ LDSCRIPT = mcu/rv32/virt.ld
+ 
+-# If the ROMFS partition size is not enough, remember to change
+-# ports/qemu/mcu/rv32/virt.ld to resize the ROMFS section as well.
+-
+-MICROPY_HW_ROMFS_PART0_START = 0x80610000
+-MICROPY_HW_ROMFS_PART0_SIZE = 0x00400000
+-
+ SRC_BOARD_O += shared/runtime/gchelper_native.o shared/runtime/gchelper_rv32i.o
+ 
+ MPY_CROSS_FLAGS += -march=rv32imc -march-flags=zba
+diff --git a/ports/qemu/boards/VIRT_RV64/mpconfigboard.mk b/ports/qemu/boards/VIRT_RV64/mpconfigboard.mk
+index 38939b032..dae4ca3e0 100644
+--- a/ports/qemu/boards/VIRT_RV64/mpconfigboard.mk
++++ b/ports/qemu/boards/VIRT_RV64/mpconfigboard.mk
+@@ -6,12 +6,6 @@ CFLAGS += -DMICROPY_HW_MCU_NAME='"$(RV64_ARCH)"'
+ 
+ LDSCRIPT = mcu/rv64/virt.ld
+ 
+-# If the ROMFS partition size is not enough, remember to change
+-# ports/qemu/mcu/rv64/virt.ld to resize the ROMFS section as well.
+-
+-MICROPY_HW_ROMFS_PART0_START = 0x80620000
+-MICROPY_HW_ROMFS_PART0_SIZE = 0x00400000
+-
+ SRC_BOARD_O += shared/runtime/gchelper_native.o shared/runtime/gchelper_rv64i.o
+ 
+ MPY_CROSS_FLAGS += -march=rv64imc
+diff --git a/ports/qemu/mcu/arm/imx6.ld b/ports/qemu/mcu/arm/imx6.ld
+index 766486160..c6d8e0818 100644
+--- a/ports/qemu/mcu/arm/imx6.ld
++++ b/ports/qemu/mcu/arm/imx6.ld
+@@ -7,9 +7,8 @@
+ 
+ MEMORY
+ {
+-    ROM   : ORIGIN = 0x00000000,                LENGTH = 96K
+-    RAM   : ORIGIN = 0x10000000,                LENGTH = 124M
+-    ROMFS : ORIGIN = ORIGIN(RAM) + LENGTH(RAM), LENGTH = 4M
++    ROM : ORIGIN = 0x00000000, LENGTH = 96K
++    RAM : ORIGIN = 0x10000000, LENGTH = 128M
+ }
+ 
+ _estack = ORIGIN(RAM) + LENGTH(RAM);
+diff --git a/ports/qemu/mcu/rv32/virt.ld b/ports/qemu/mcu/rv32/virt.ld
+index 5d625ac34..64675ad4e 100644
+--- a/ports/qemu/mcu/rv32/virt.ld
++++ b/ports/qemu/mcu/rv32/virt.ld
+@@ -38,14 +38,12 @@ OUTPUT_FORMAT("elf32-littleriscv", "elf32-littleriscv", "elf32-littleriscv");
+  * 0x8060_0000: .stack
+  * 0x8060_0000: _sstack
+  * 0x8060_FFFF: _estack
+- * 0x8061_0000: .romfs
+  */
+ MEMORY
+ {
+-    ROM   (xr)  : ORIGIN = 0x80000000,                    LENGTH = 4M
+-    RAM   (xrw) : ORIGIN = ORIGIN(ROM) + LENGTH(ROM),     LENGTH = 2M
+-    STACK (rw)  : ORIGIN = ORIGIN(RAM) + LENGTH(RAM),     LENGTH = 64K
+-    ROMFS (xr)  : ORIGIN = ORIGIN(STACK) + LENGTH(STACK), LENGTH = 4M
++    ROM   (xr)  : ORIGIN = 0x80000000,                LENGTH = 4M
++    RAM   (xrw) : ORIGIN = ORIGIN(ROM) + LENGTH(ROM), LENGTH = 2M
++    STACK (rw)  : ORIGIN = ORIGIN(RAM) + LENGTH(RAM), LENGTH = 64K
+ }
+ 
+ SECTIONS
+diff --git a/ports/qemu/mcu/rv64/virt.ld b/ports/qemu/mcu/rv64/virt.ld
+index 4373be30c..7727839e0 100644
+--- a/ports/qemu/mcu/rv64/virt.ld
++++ b/ports/qemu/mcu/rv64/virt.ld
+@@ -38,14 +38,12 @@ OUTPUT_FORMAT("elf64-littleriscv", "elf64-littleriscv", "elf64-littleriscv");
+  * 0x0000_0000_8060_0000: .stack
+  * 0x0000_0000_8060_0000: _sstack
+  * 0x0000_0000_8061_FFFF: _estack
+- * 0x0000_0000_8062_0000: .romfs
+  */
+ MEMORY
+ {
+-    ROM   (xr)  : ORIGIN = 0x0000000080000000,            LENGTH = 4M
+-    RAM   (xrw) : ORIGIN = ORIGIN(ROM) + LENGTH(ROM),     LENGTH = 2M
+-    STACK (rw)  : ORIGIN = ORIGIN(RAM) + LENGTH(RAM),     LENGTH = 128K
+-    ROMFS (xr)  : ORIGIN = ORIGIN(STACK) + LENGTH(STACK), LENGTH = 4M
++    ROM   (xr)  : ORIGIN = 0x0000000080000000,        LENGTH = 4M
++    RAM   (xrw) : ORIGIN = ORIGIN(ROM) + LENGTH(ROM), LENGTH = 2M
++    STACK (rw)  : ORIGIN = ORIGIN(RAM) + LENGTH(RAM), LENGTH = 128K
+ }
+ 
+ SECTIONS
+diff --git a/ports/renesas-ra/Makefile b/ports/renesas-ra/Makefile
+index fed0f9965..77a09502d 100644
+--- a/ports/renesas-ra/Makefile
++++ b/ports/renesas-ra/Makefile
+@@ -148,6 +148,15 @@ else
+ COPT += -Os -DNDEBUG
+ endif
+ 
++# Flags for optional C++ source code
++CXXFLAGS += $(filter-out -Wmissing-prototypes -Wold-style-definition -std=gnu99,$(CFLAGS))
++
++# TODO make this common -- shouldn't be using these "private" vars from py.mk
++ifneq ($(SRC_CXX)$(SRC_USERMOD_CXX)$(SRC_USERMOD_LIB_CXX),)
++LIBSTDCPP_FILE_NAME = "$(shell $(CXX) $(CXXFLAGS) -print-file-name=libstdc++.a)"
++LDFLAGS += -L"$(shell dirname $(LIBSTDCPP_FILE_NAME))"
++endif
++
+ # Options for mpy-cross
+ MPY_CROSS_FLAGS += -march=armv7m
+ 
+diff --git a/ports/rp2/Makefile b/ports/rp2/Makefile
+index 0ba6c81a0..2895faaca 100644
+--- a/ports/rp2/Makefile
++++ b/ports/rp2/Makefile
+@@ -56,10 +56,6 @@ ifdef MICROPY_PREVIEW_VERSION_2
+ CMAKE_ARGS += -DMICROPY_PREVIEW_VERSION_2=1
+ endif
+ 
+-ifdef MICROPY_C_HEAP_SIZE
+-CMAKE_ARGS += -DMICROPY_C_HEAP_SIZE=$(MICROPY_C_HEAP_SIZE)
+-endif
+-
+ HELP_PICO_SDK_SUBMODULE ?= "\033[1;31mError: pico-sdk submodule is not initialized.\033[0m Run 'make submodules'"
+ HELP_BUILD_ERROR ?= "See \033[1;31mhttps://github.com/micropython/micropython/wiki/Build-Troubleshooting\033[0m"
+ 
+diff --git a/ports/rp2/mpconfigport.h b/ports/rp2/mpconfigport.h
+index 29d084582..c8df4cdb0 100644
+--- a/ports/rp2/mpconfigport.h
++++ b/ports/rp2/mpconfigport.h
+@@ -103,6 +103,10 @@
+ #if PICO_ARM
+ #define MICROPY_EMIT_THUMB                      (1)
+ #define MICROPY_EMIT_INLINE_THUMB               (1)
++#if PICO_RP2040
++#define MICROPY_EMIT_THUMB_ARMV7M               (0)
++#define MICROPY_EMIT_INLINE_THUMB_FLOAT         (0)
++#endif
+ #elif PICO_RISCV
+ #define MICROPY_EMIT_RV32                       (1)
+ #define MICROPY_EMIT_RV32_ZBA                   (1)
+diff --git a/ports/rp2/rp2_dma.c b/ports/rp2/rp2_dma.c
+index 7e4d3cd92..bb935f3b4 100644
+--- a/ports/rp2/rp2_dma.c
++++ b/ports/rp2/rp2_dma.c
+@@ -50,14 +50,13 @@ typedef struct _rp2_dma_obj_t {
+ } rp2_dma_obj_t;
+ 
+ typedef struct _rp2_dma_ctrl_field_t {
+-    qstr_short_t name;
+-    uint16_t shift : 5;
+-    uint16_t length : 3;
+-    uint16_t read_only : 1;
+-    // 7 bits available here.
++    qstr name;
++    uint8_t shift : 5;
++    uint8_t length : 3;
++    uint8_t read_only : 1;
+ } rp2_dma_ctrl_field_t;
+ 
+-static const rp2_dma_ctrl_field_t rp2_dma_ctrl_fields_table[] = {
++static rp2_dma_ctrl_field_t rp2_dma_ctrl_fields_table[] = {
+     { MP_QSTR_enable, DMA_CH0_CTRL_TRIG_EN_LSB, 1, 0 },
+     { MP_QSTR_high_pri, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_LSB, 1, 0 },
+     { MP_QSTR_size, DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB, 2, 0 },
+diff --git a/ports/samd/Makefile b/ports/samd/Makefile
+index 9204317aa..ada550bf1 100644
+--- a/ports/samd/Makefile
++++ b/ports/samd/Makefile
+@@ -108,6 +108,15 @@ ifeq ($(MICROPY_HW_ROMFS_BYTES),0)
+ 	CFLAGS += -DMICROPY_VFS_ROM=0
+ endif
+ 
++# Flags for optional C++ source code
++CXXFLAGS += $(filter-out -std=c99,$(CFLAGS))
++
++# TODO make this common -- shouldn't be using these "private" vars from py.mk
++ifneq ($(SRC_CXX)$(SRC_USERMOD_CXX)$(SRC_USERMOD_LIB_CXX),)
++LIBSTDCPP_FILE_NAME = "$(shell $(CXX) $(CXXFLAGS) -print-file-name=libstdc++.a)"
++LDFLAGS += -L"$(shell dirname $(LIBSTDCPP_FILE_NAME))"
++endif
++
+ MPY_CROSS_FLAGS += -march=$(MPY_CROSS_MCU_ARCH)
+ 
+ SRC_C += \
+diff --git a/ports/samd/mcu/samd21/mpconfigmcu.h b/ports/samd/mcu/samd21/mpconfigmcu.h
+index a6be13b24..a75789394 100644
+--- a/ports/samd/mcu/samd21/mpconfigmcu.h
++++ b/ports/samd/mcu/samd21/mpconfigmcu.h
+@@ -6,6 +6,7 @@
+ // MicroPython emitters
+ #define MICROPY_EMIT_THUMB              (SAMD21_EXTRA_FEATURES)
+ #define MICROPY_EMIT_INLINE_THUMB       (SAMD21_EXTRA_FEATURES)
++#define MICROPY_EMIT_THUMB_ARMV7M       (0)
+ #define MICROPY_MODULE_BUILTIN_INIT     (1)
+ 
+ // Selected extensions beyond the basic features set.
+diff --git a/ports/stm32/Makefile b/ports/stm32/Makefile
+index 4c9366b8b..8c81b058d 100644
+--- a/ports/stm32/Makefile
++++ b/ports/stm32/Makefile
+@@ -189,6 +189,15 @@ endif
+ COPT ?= -Os -DNDEBUG
+ endif
+ 
++# Flags for optional C++ source code
++CXXFLAGS += $(filter-out -Wmissing-prototypes -Wold-style-definition -std=gnu99,$(CFLAGS))
++
++# TODO make this common -- shouldn't be using these "private" vars from py.mk
++ifneq ($(SRC_CXX)$(SRC_USERMOD_CXX)$(SRC_USERMOD_LIB_CXX),)
++LIBSTDCPP_FILE_NAME = "$(shell $(CXX) $(CXXFLAGS) -print-file-name=libstdc++.a)"
++LDFLAGS += -L"$(shell dirname $(LIBSTDCPP_FILE_NAME))"
++endif
++
+ # Options for mpy-cross
+ MPY_CROSS_FLAGS += -march=$(MPY_CROSS_MCU_ARCH_$(MCU_SERIES))
+ 
+diff --git a/ports/stm32/mpconfigport.h b/ports/stm32/mpconfigport.h
+index 19d4ef8ae..bc9e94902 100644
+--- a/ports/stm32/mpconfigport.h
++++ b/ports/stm32/mpconfigport.h
+@@ -123,7 +123,7 @@
+ #define MICROPY_PY_MACHINE_BITSTREAM (1)
+ #endif
+ #ifndef MICROPY_PY_MACHINE_CAN
+-#if defined(MICROPY_HW_CAN1_TX) || defined(MICROPY_HW_CAN2_TX)
++#ifdef MICROPY_HW_CAN1_TX
+ #define MICROPY_PY_MACHINE_CAN (1)
+ #else
+ #define MICROPY_PY_MACHINE_CAN (0)
+diff --git a/ports/unix/Makefile b/ports/unix/Makefile
+index 7d71fc3f9..70e4f3391 100644
+--- a/ports/unix/Makefile
++++ b/ports/unix/Makefile
+@@ -239,6 +239,8 @@ ifneq ($(FROZEN_MANIFEST),)
+ CFLAGS += -DMPZ_DIG_SIZE=16 # force 16 bits to work on both 32 and 64 bit archs
+ endif
+ 
++CXXFLAGS += $(filter-out -Wmissing-prototypes -Wold-style-definition -std=gnu99,$(CFLAGS) $(CXXFLAGS_MOD))
++
+ ifeq ($(MICROPY_FORCE_32BIT),1)
+ RUN_TESTS_MPY_CROSS_FLAGS = --mpy-cross-flags='-march=x86'
+ endif
+diff --git a/ports/unix/variants/coverage/manifest.py b/ports/unix/variants/coverage/manifest.py
+index 2d459103e..37f2531a8 100644
+--- a/ports/unix/variants/coverage/manifest.py
++++ b/ports/unix/variants/coverage/manifest.py
+@@ -1,5 +1,5 @@
+ add_library("unix-ffi", "$(MPY_LIB_DIR)/unix-ffi")
+ freeze_as_str("frzstr")
+ freeze_as_mpy("frzmpy")
+-freeze_mpy("$(MPY_DIR)/tests/assets")
++freeze_mpy("$(MPY_DIR)/tests/frozen")
+ require("ssl")
+diff --git a/ports/windows/Makefile b/ports/windows/Makefile
+index 8d371ed8a..4129b7fe2 100644
+--- a/ports/windows/Makefile
++++ b/ports/windows/Makefile
+@@ -104,6 +104,8 @@ ifeq ($(shell $(CC) -dumpmachine),i686-w64-mingw32)
+ CFLAGS += -msse -mfpmath=sse -march=pentium4
+ endif
+ 
++CXXFLAGS += $(filter-out -std=gnu99,$(CFLAGS))
++
+ include $(TOP)/py/mkrules.mk
+ 
+ .PHONY: test test_full
+diff --git a/py/compile.c b/py/compile.c
+index 37a3e6d32..72dad8dc3 100644
+--- a/py/compile.c
++++ b/py/compile.c
+@@ -2421,14 +2421,6 @@ static void compile_trailer_paren_helper(compiler_t *comp, mp_parse_node_t pn_ar
+                     compile_syntax_error(comp, (mp_parse_node_t)pns_arg, MP_ERROR_TEXT("* arg after **"));
+                     return;
+                 }
+-                if (n_keyword) {
+-                    // Support for *arg after kwarg is a CPython feature omitted
+-                    // from MicroPython in order to reduce code size. See
+-                    // https://github.com/micropython/micropython/issues/11439 for
+-                    // more info.
+-                    compile_syntax_error(comp, (mp_parse_node_t)pns_arg, MP_ERROR_TEXT("* arg after kwarg"));
+-                    return;
+-                }
+                 #if MICROPY_DYNAMIC_COMPILER
+                 if (i >= (size_t)mp_dynamic_compiler.small_int_bits - 1)
+                 #else
+diff --git a/py/emitinlinethumb.c b/py/emitinlinethumb.c
+index 9c82921ed..d6596337a 100644
+--- a/py/emitinlinethumb.c
++++ b/py/emitinlinethumb.c
+@@ -364,15 +364,24 @@ static int get_arg_label(emit_inline_asm_t *emit, const char *op, mp_parse_node_
+     return 0;
+ }
+ 
+-#define ENCODE_CC(c1, c2) (((uint16_t)(c1) << 8) | (uint16_t)(c2))
+-
+-// Positions in the table match the condition code value.
+-static const uint16_t CONDITION_CODES[] = {
+-    ENCODE_CC('e', 'q'), ENCODE_CC('n', 'e'), ENCODE_CC('c', 's'),
+-    ENCODE_CC('c', 'c'), ENCODE_CC('m', 'i'), ENCODE_CC('p', 'l'),
+-    ENCODE_CC('v', 's'), ENCODE_CC('v', 'c'), ENCODE_CC('h', 'i'),
+-    ENCODE_CC('l', 's'), ENCODE_CC('g', 'e'), ENCODE_CC('l', 't'),
+-    ENCODE_CC('g', 't'), ENCODE_CC('l', 'e'),
++typedef struct _cc_name_t { byte cc;
++                            byte name[2];
++} cc_name_t;
++static const cc_name_t cc_name_table[] = {
++    { ASM_THUMB_CC_EQ, { 'e', 'q' }},
++    { ASM_THUMB_CC_NE, { 'n', 'e' }},
++    { ASM_THUMB_CC_CS, { 'c', 's' }},
++    { ASM_THUMB_CC_CC, { 'c', 'c' }},
++    { ASM_THUMB_CC_MI, { 'm', 'i' }},
++    { ASM_THUMB_CC_PL, { 'p', 'l' }},
++    { ASM_THUMB_CC_VS, { 'v', 's' }},
++    { ASM_THUMB_CC_VC, { 'v', 'c' }},
++    { ASM_THUMB_CC_HI, { 'h', 'i' }},
++    { ASM_THUMB_CC_LS, { 'l', 's' }},
++    { ASM_THUMB_CC_GE, { 'g', 'e' }},
++    { ASM_THUMB_CC_LT, { 'l', 't' }},
++    { ASM_THUMB_CC_GT, { 'g', 't' }},
++    { ASM_THUMB_CC_LE, { 'l', 'e' }},
+ };
+ 
+ typedef struct _format_4_op_t { byte op;
+@@ -565,11 +574,9 @@ static void emit_inline_thumb_op(emit_inline_asm_t *emit, qstr op, mp_uint_t n_a
+                                         || (op_len == 5 && op_str[3] == '_'
+                                             && (op_str[4] == 'n' || (ARMV7M && op_str[4] == 'w'))))) {
+             mp_uint_t cc = -1;
+-            uint16_t condition_code = ENCODE_CC(op_str[1], op_str[2]);
+-            for (size_t i = 0; i < MP_ARRAY_SIZE(CONDITION_CODES); ++i) {
+-                if (condition_code == CONDITION_CODES[i]) {
+-                    cc = i;
+-                    break;
++            for (mp_uint_t i = 0; i < MP_ARRAY_SIZE(cc_name_table); i++) {
++                if (op_str[1] == cc_name_table[i].name[0] && op_str[2] == cc_name_table[i].name[1]) {
++                    cc = cc_name_table[i].cc;
+                 }
+             }
+             if (cc == (mp_uint_t)-1) {
+@@ -585,14 +592,12 @@ static void emit_inline_thumb_op(emit_inline_asm_t *emit, qstr op, mp_uint_t n_a
+             }
+         } else if (ARMV7M && op_str[0] == 'i' && op_str[1] == 't') {
+             const char *arg_str = get_arg_str(pn_args[0]);
+-            if (strlen(arg_str) != 2) {
+-                goto unknown_op;
+-            }
+             mp_uint_t cc = -1;
+-            uint16_t condition_code = ENCODE_CC(arg_str[0], arg_str[1]);
+-            for (size_t i = 0; i < MP_ARRAY_SIZE(CONDITION_CODES); ++i) {
+-                if (condition_code == CONDITION_CODES[i]) {
+-                    cc = i;
++            for (mp_uint_t i = 0; i < MP_ARRAY_SIZE(cc_name_table); i++) {
++                if (arg_str[0] == cc_name_table[i].name[0]
++                    && arg_str[1] == cc_name_table[i].name[1]
++                    && arg_str[2] == '\0') {
++                    cc = cc_name_table[i].cc;
+                     break;
+                 }
+             }
+diff --git a/py/mkrules.mk b/py/mkrules.mk
+index 6ac731b36..4968ed58b 100644
+--- a/py/mkrules.mk
++++ b/py/mkrules.mk
+@@ -38,18 +38,6 @@ CFLAGS += -DMICROPY_BOARD_BUILD_NAME=\"$(BOARD)-$(BOARD_VARIANT)\"
+ endif
+ endif
+ 
+-# Add default C++ compiler flags based on CFLAGS. For use with C++ user modules.
+-CXXFLAGS += $(filter-out -Wmissing-prototypes -Wold-style-definition -std=gnu99 -std=c99 -std=c11,$(CFLAGS) $(CXXFLAGS_MOD))
+-
+-# Add LDFLAGS to link libstdc++ on bare metal ports. Added only if a port has
+-# -nostdlib in LDFLAGS and C++ source files are provided.
+-ifneq ($(findstring nostdlib,"$(LDFLAGS)"),)
+-ifneq ($(SRC_CXX)$(SRC_USERMOD_CXX)$(SRC_USERMOD_LIB_CXX),)
+-LIBSTDCPP_FILE_NAME = "$(shell $(CXX) $(CXXFLAGS) -print-file-name=libstdc++.a)"
+-LDFLAGS += -L"$(shell dirname $(LIBSTDCPP_FILE_NAME))"
+-endif
+-endif
+-
+ # QSTR generation uses the same CFLAGS, with these modifications.
+ QSTR_GEN_FLAGS = -DNO_QSTR
+ # Note: := to force evaluation immediately.
+diff --git a/py/modio.c b/py/modio.c
+index fdee48437..9aeb42d30 100644
+--- a/py/modio.c
++++ b/py/modio.c
+@@ -63,10 +63,6 @@ static mp_uint_t iobase_read_write(mp_obj_t obj, void *buf, mp_uint_t size, int
+     }
+     mp_int_t ret = mp_obj_get_int(ret_obj);
+     if (ret >= 0) {
+-        if ((mp_uint_t)ret > size) {
+-            *errcode = MP_EIO;
+-            return MP_STREAM_ERROR;
+-        }
+         return ret;
+     } else {
+         *errcode = -ret;
+diff --git a/py/mpconfig.h b/py/mpconfig.h
+index 0d8189853..8a26ce4dd 100644
+--- a/py/mpconfig.h
++++ b/py/mpconfig.h
+@@ -464,11 +464,7 @@ typedef uint64_t mp_uint_t;
+ 
+ // Whether to emit ARMv7-M instruction support in thumb native code
+ #ifndef MICROPY_EMIT_THUMB_ARMV7M
+-#if defined(__ARM_ARCH_ISA_THUMB) && __ARM_ARCH_ISA_THUMB == 2
+ #define MICROPY_EMIT_THUMB_ARMV7M (1)
+-#else
+-#define MICROPY_EMIT_THUMB_ARMV7M (0)
+-#endif
+ #endif
+ 
+ // Whether to enable the thumb inline assembler
+@@ -478,11 +474,7 @@ typedef uint64_t mp_uint_t;
+ 
+ // Whether to enable float support in the Thumb2 inline assembler
+ #ifndef MICROPY_EMIT_INLINE_THUMB_FLOAT
+-#if defined(__ARM_ARCH_ISA_THUMB) && __ARM_ARCH_ISA_THUMB == 2 && defined(__ARM_FP)
+ #define MICROPY_EMIT_INLINE_THUMB_FLOAT (1)
+-#else
+-#define MICROPY_EMIT_INLINE_THUMB_FLOAT (0)
+-#endif
+ #endif
+ 
+ // Whether to emit ARM native code
+diff --git a/py/objint_longlong.c b/py/objint_longlong.c
+index e16fd5265..1a6242b97 100644
+--- a/py/objint_longlong.c
++++ b/py/objint_longlong.c
+@@ -229,7 +229,7 @@ mp_obj_t mp_obj_int_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t rhs_i
+                 // negative shift not allowed
+                 mp_raise_ValueError(MP_ERROR_TEXT("negative shift count"));
+             }
+-            overflow = rhs_val >= (long long)(sizeof(long long) * MP_BITS_PER_BYTE)
++            overflow = rhs_val >= (sizeof(long long) * MP_BITS_PER_BYTE)
+                 || lhs_val > (LLONG_MAX >> rhs_val)
+                 || lhs_val < (LLONG_MIN >> rhs_val);
+             result = (unsigned long long)lhs_val << rhs_val;
+diff --git a/py/objtuple.c b/py/objtuple.c
+index c0ba1fd0d..c9d8e9b31 100644
+--- a/py/objtuple.c
++++ b/py/objtuple.c
+@@ -103,27 +103,20 @@ static mp_obj_t mp_obj_tuple_make_new(const mp_obj_type_t *type_in, size_t n_arg
+     }
+ }
+ 
+-static mp_obj_tuple_t *tuple_subclass_helper(mp_obj_t obj) {
+-    assert(obj != MP_OBJ_NULL);
+-    const mp_obj_type_t *tuple_type = mp_obj_get_type(obj);
+-    if (MP_OBJ_TYPE_GET_SLOT_OR_NULL(tuple_type, iter) != mp_obj_tuple_getiter) {
+-        // Slow path for user subclasses
+-        obj = mp_obj_cast_to_native_base(obj, MP_OBJ_FROM_PTR(&mp_type_tuple));
+-        if (obj == MP_OBJ_NULL) {
+-            return NULL;
+-        }
+-    }
+-    return MP_OBJ_TO_PTR(obj);
+-}
+-
+ // Don't pass MP_BINARY_OP_NOT_EQUAL here
+ static mp_obj_t tuple_cmp_helper(mp_uint_t op, mp_obj_t self_in, mp_obj_t another_in) {
+     mp_check_self(mp_obj_is_tuple_compatible(self_in));
++    const mp_obj_type_t *another_type = mp_obj_get_type(another_in);
+     mp_obj_tuple_t *self = MP_OBJ_TO_PTR(self_in);
+-    mp_obj_tuple_t *another = tuple_subclass_helper(another_in);
+-    if (!another) {
+-        return MP_OBJ_NULL;
++    if (MP_OBJ_TYPE_GET_SLOT_OR_NULL(another_type, iter) != mp_obj_tuple_getiter) {
++        // Slow path for user subclasses
++        another_in = mp_obj_cast_to_native_base(another_in, MP_OBJ_FROM_PTR(&mp_type_tuple));
++        if (another_in == MP_OBJ_NULL) {
++            return MP_OBJ_NULL;
++        }
+     }
++    mp_obj_tuple_t *another = MP_OBJ_TO_PTR(another_in);
++
+     return mp_obj_new_bool(mp_seq_cmp_objs(op, self->items, self->len, another->items, another->len));
+ }
+ 
+@@ -152,10 +145,10 @@ mp_obj_t mp_obj_tuple_binary_op(mp_binary_op_t op, mp_obj_t lhs, mp_obj_t rhs) {
+     switch (op) {
+         case MP_BINARY_OP_ADD:
+         case MP_BINARY_OP_INPLACE_ADD: {
+-            mp_obj_tuple_t *p = tuple_subclass_helper(rhs);
+-            if (!p) {
++            if (!mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(mp_obj_get_type(rhs)), MP_OBJ_FROM_PTR(&mp_type_tuple))) {
+                 return MP_OBJ_NULL; // op not supported
+             }
++            mp_obj_tuple_t *p = MP_OBJ_TO_PTR(rhs);
+             mp_obj_tuple_t *s = MP_OBJ_TO_PTR(mp_obj_new_tuple(o->len + p->len, NULL));
+             mp_seq_cat(s->items, o->items, o->len, p->items, p->len, mp_obj_t);
+             return MP_OBJ_FROM_PTR(s);
+diff --git a/tests/assets/Makefile b/tests/assets/Makefile
+deleted file mode 100644
+index 6048ee2a4..000000000
+--- a/tests/assets/Makefile
++++ /dev/null
+@@ -1,29 +0,0 @@
+-MPY_DIR = ../..
+-
+-PYTHON := $(command -v python3 2> /dev/null)
+-ifndef PYTHON
+-PYTHON = python
+-endif
+-
+-# Files created with dd if=/dev/urandom ... - the file name is the CRC32
+-# of the data contained in the file itself.
+-
+-ROMFS_FILES = romfs_source/0x30d83fe5.bin \
+-	      romfs_source/0x37bef0eb.bin \
+-	      romfs_source/0x442f3b5f.bin \
+-	      romfs_source/0x648793fb.bin \
+-	      romfs_source/0x913837b6.bin \
+-	      romfs_source/0xdb14aac7.bin \
+-	      romfs_source/romfs_sentinel.txt
+-
+-.PHONY: romfs
+-romfs: all
+-
+-.PHONY: clean
+-clean:
+-	rm -f random_romfs.bin
+-
+-all: random_romfs.bin
+-
+-random_romfs.bin: $(ROMFS_FILES)
+-	$(PYTHON) $(MPY_DIR)/tools/mpremote/mpremote.py romfs --partition 0 --no-mpy --output $@ build romfs_source
+diff --git a/tests/assets/README.md b/tests/assets/README.md
+deleted file mode 100644
+index a5f935ee1..000000000
+--- a/tests/assets/README.md
++++ /dev/null
+@@ -1,8 +0,0 @@
+-This directory contains assets for other tests to use:
+-
+-- A .mpy built against the current .mpy version that can be used to test
+-  freezing without a dependency on mpy-cross (`frozentest.py` and
+-  `frozentest.mpy`)
+-- A ROMFS image containing random binary files for testing mounting and reading
+-  from the partition without having to generate a custom image
+-  (`random_romfs.bin`, the `romfs_source` directory, and `Makefile`)
+diff --git a/tests/assets/random_romfs.bin b/tests/assets/random_romfs.bin
+deleted file mode 100644
+index 387bd7ec4..000000000
+Binary files a/tests/assets/random_romfs.bin and /dev/null differ
+diff --git a/tests/assets/romfs_source/0x30d83fe5.bin b/tests/assets/romfs_source/0x30d83fe5.bin
+deleted file mode 100644
+index 625e51fb8..000000000
+Binary files a/tests/assets/romfs_source/0x30d83fe5.bin and /dev/null differ
+diff --git a/tests/assets/romfs_source/0x37bef0eb.bin b/tests/assets/romfs_source/0x37bef0eb.bin
+deleted file mode 100644
+index 11e1c6787..000000000
+Binary files a/tests/assets/romfs_source/0x37bef0eb.bin and /dev/null differ
+diff --git a/tests/assets/romfs_source/0x442f3b5f.bin b/tests/assets/romfs_source/0x442f3b5f.bin
+deleted file mode 100644
+index ffe9f8f0e..000000000
+Binary files a/tests/assets/romfs_source/0x442f3b5f.bin and /dev/null differ
+diff --git a/tests/assets/romfs_source/0x648793fb.bin b/tests/assets/romfs_source/0x648793fb.bin
+deleted file mode 100644
+index f99b58c61..000000000
+Binary files a/tests/assets/romfs_source/0x648793fb.bin and /dev/null differ
+diff --git a/tests/assets/romfs_source/0x913837b6.bin b/tests/assets/romfs_source/0x913837b6.bin
+deleted file mode 100644
+index 651118434..000000000
+Binary files a/tests/assets/romfs_source/0x913837b6.bin and /dev/null differ
+diff --git a/tests/assets/romfs_source/0xdb14aac7.bin b/tests/assets/romfs_source/0xdb14aac7.bin
+deleted file mode 100644
+index 51754d4ec..000000000
+Binary files a/tests/assets/romfs_source/0xdb14aac7.bin and /dev/null differ
+diff --git a/tests/assets/romfs_source/romfs_sentinel.txt b/tests/assets/romfs_source/romfs_sentinel.txt
+deleted file mode 100644
+index 6ff9311d7..000000000
+--- a/tests/assets/romfs_source/romfs_sentinel.txt
++++ /dev/null
+@@ -1,3 +0,0 @@
+-*MPY-ROMFS-TEST-PARTITION*
+-
+-This is a ROMFS partition to be used in MicroPython tests, usually for CI.
+diff --git a/tests/basics/fun_callstar_kwarg.py b/tests/basics/fun_callstar_kwarg.py
+deleted file mode 100644
+index 15bc19e21..000000000
+--- a/tests/basics/fun_callstar_kwarg.py
++++ /dev/null
+@@ -1,8 +0,0 @@
+-# A CPython syntax feature not supported by MicroPython. For more information
+-# see `this issue <https://github.com/micropython/micropython/issues/11439>`_.
+-# and tests/cpydiff/core_function_star.py
+-
+-try:
+-    exec("f(y=1, *(3,))")
+-except SyntaxError as e:
+-    print("SyntaxError")
+diff --git a/tests/basics/fun_callstar_kwarg.py.exp b/tests/basics/fun_callstar_kwarg.py.exp
+deleted file mode 100644
+index 8729fc434..000000000
+--- a/tests/basics/fun_callstar_kwarg.py.exp
++++ /dev/null
+@@ -1 +0,0 @@
+-SyntaxError
+diff --git a/tests/basics/tuple_subclass.py b/tests/basics/tuple_subclass.py
+deleted file mode 100644
+index a8ee3ff1a..000000000
+--- a/tests/basics/tuple_subclass.py
++++ /dev/null
+@@ -1,62 +0,0 @@
+-try:
+-    from collections import namedtuple
+-except ImportError:
+-    print("SKIP")
+-    raise SystemExit
+-
+-
+-class MyTuple(tuple):
+-    pass
+-
+-
+-N = namedtuple("N", ("a", "b"))
+-
+-
+-class MyNamedTuple(N):
+-    pass
+-
+-
+-t = (1, 2)
+-m = MyTuple((3, 4))
+-n = N(5, 6)
+-q = MyNamedTuple(7, 8)
+-
+-print(t + t)
+-print(t + m)
+-print(t + n)
+-print(t + q)
+-
+-print(m + t)
+-print(m + m)
+-print(m + n)
+-print(m + q)
+-
+-print(n + t)
+-print(n + m)
+-print(n + n)
+-print(n + q)
+-
+-print(q + t)
+-print(q + m)
+-print(q + n)
+-print(q + q)
+-
+-print(t < t)
+-print(t < m)
+-print(t < n)
+-print(t < q)
+-
+-print(m < t)
+-print(m < m)
+-print(m < n)
+-print(m < q)
+-
+-print(n < t)
+-print(n < m)
+-print(n < n)
+-print(n < q)
+-
+-print(q < t)
+-print(q < m)
+-print(q < n)
+-print(q < q)
+diff --git a/tests/cpydiff/core_function_star.py b/tests/cpydiff/core_function_star.py
+deleted file mode 100644
+index 26f5effd4..000000000
+--- a/tests/cpydiff/core_function_star.py
++++ /dev/null
+@@ -1,16 +0,0 @@
+-"""
+-categories: Core,Functions
+-description: ``*args`` cannot follow a keyword argument
+-cause: MicroPython is optimised for code space. For more information see `this issue <https://github.com/micropython/micropython/issues/11439>`_.
+-workaround: Re-order the arguments
+-"""
+-
+-
+-def f(x, y):
+-    return x + y
+-
+-
+-try:
+-    print(f(y=1, *(3,)))
+-except Exception as e:
+-    print(e)
+diff --git a/tests/extmod/re_stack_overflow2.py b/tests/extmod/re_stack_overflow2.py
+deleted file mode 100644
+index c5ddd012b..000000000
+--- a/tests/extmod/re_stack_overflow2.py
++++ /dev/null
+@@ -1,25 +0,0 @@
+-# Test overflow in re.compile output code.
+-
+-try:
+-    import re
+-except ImportError:
+-    print("SKIP")
+-    raise SystemExit
+-
+-
+-def test_re(r):
+-    try:
+-        re.compile(r)
+-    except:
+-        print("Error")
+-
+-
+-try:
+-    r = "(" * 65536 + ")" * 65536
+-except MemoryError:
+-    print("SKIP")
+-    raise SystemExit
+-
+-# This happens to trigger RecursionError on current versions of CPython
+-# (tested with 3.13.5) as well, so no .exp file is needed.
+-test_re(r)
+diff --git a/tests/frozen/README.md b/tests/frozen/README.md
 new file mode 100644
+index 000000000..bd786d5a3
 --- /dev/null
-+++ b/ports/esp32/boards/ESP32_GENERIC_S3/sdkconfig.esp_panel
-+# ESP32_Display_Panel configuration for JC3248W535EN (AXS15231B QSPI)
-+# Unset FILE_SKIP flags so the .h conf files are used instead of Kconfig defaults.
-+# IDF sdkconfig.defaults syntax: "# CONFIG_X is not set" disables a bool that defaults to y.
-+# CONFIG_ESP_PANEL_DRIVERS_FILE_SKIP is not set
-+# CONFIG_ESP_PANEL_BOARD_FILE_SKIP is not set
-+# CONFIG_ESP_UTILS_CONF_FILE_SKIP is not set
++++ b/tests/frozen/README.md
+@@ -0,0 +1,2 @@
++This is a .mpy built against the current .mpy version that can be used to test
++freezing without a dependency on mpy-cross.
+diff --git a/tests/assets/frozentest.mpy b/tests/frozen/frozentest.mpy
+similarity index 100%
+rename from tests/assets/frozentest.mpy
+rename to tests/frozen/frozentest.mpy
+diff --git a/tests/assets/frozentest.py b/tests/frozen/frozentest.py
+similarity index 100%
+rename from tests/assets/frozentest.py
+rename to tests/frozen/frozentest.py
+diff --git a/tests/inlineasm/thumb/asmbcc.py b/tests/inlineasm/thumb/asmbcc.py
+index bf0ee0a48..08967d48c 100644
+--- a/tests/inlineasm/thumb/asmbcc.py
++++ b/tests/inlineasm/thumb/asmbcc.py
+@@ -1,65 +1,29 @@
+-# test bcc instructions, narrow and wide versions
++# test bcc instructions
++# at the moment only tests beq, narrow and wide versions
+ 
+ 
+-RESULT = []
+-
+-
+-TEMPLATE = """
+ @micropython.asm_thumb
+-def t(r0):
++def f(r0):
+     mov(r1, r0)
+ 
+     mov(r0, 10)
+     cmp(r1, 1)
+-    b{}(next1)
+-
+-    b(end)
+-
+-    label(next1)
++    beq(end)
+ 
+     mov(r0, 20)
+     cmp(r1, 2)
+-    b{}_n(next2)
+-
+-    b(end)
++    beq_n(end)
+ 
+-    label(next2)
+     mov(r0, 30)
+     cmp(r1, 3)
+-    b{}_w(next3)
+-
+-    b(end)
++    beq_w(end)
+ 
+-    label(next3)
+     mov(r0, 0)
+ 
+     label(end)
+-"""
+ 
+-try:
+-    for code in (
+-        "eq",
+-        "ne",
+-        "cs",
+-        "cc",
+-        "mi",
+-        "pl",
+-        "vs",
+-        "vc",
+-        "hi",
+-        "ls",
+-        "ge",
+-        "lt",
+-        "gt",
+-        "le",
+-    ):
+-        exec(TEMPLATE.format(code, code, code))
+-        RESULT.append("B" + code.upper())
+-        for i in range(4):
+-            RESULT.append(t(i))
+-except MemoryError:
+-    print("SKIP-TOO-LARGE")
+-    raise SystemExit
+ 
+-for line in RESULT:
+-    print(line)
++print(f(0))
++print(f(1))
++print(f(2))
++print(f(3))
+diff --git a/tests/inlineasm/thumb/asmbcc.py.exp b/tests/inlineasm/thumb/asmbcc.py.exp
+index 06fd057ae..39da7d1a9 100644
+--- a/tests/inlineasm/thumb/asmbcc.py.exp
++++ b/tests/inlineasm/thumb/asmbcc.py.exp
+@@ -1,70 +1,4 @@
+-BEQ
+-10
+-20
+-10
+-10
+-BNE
+-0
+-10
+-20
+-30
+-BCS
+-10
+-20
+-30
+-0
+-BCC
+-0
+-10
+-10
+-10
+-BMI
+-0
+-10
+-10
+-10
+-BPL
+-10
+-20
+-30
+-0
+-BVS
+-10
+-10
+-10
+-10
+-BVC
+-0
+-0
+-0
+-0
+-BHI
+-10
+-10
+-20
+-30
+-BLS
+-0
+-0
+-10
+-10
+-BGE
+-10
+-20
+-30
+ 0
+-BLT
+-0
+-10
+-10
+-10
+-BGT
+-10
+ 10
+ 20
+ 30
+-BLE
+-0
+-0
+-10
+-10
+diff --git a/tests/micropython/io_badlength.py b/tests/micropython/io_badlength.py
+deleted file mode 100644
+index 646a2cd92..000000000
+--- a/tests/micropython/io_badlength.py
++++ /dev/null
+@@ -1,35 +0,0 @@
+-# Test when a use IOBase class has write/readinto which returns more data than
+-# requested (https://github.com/micropython/micropython/issues/18845)
+-
+-try:
+-    import io, json
+-except:
+-    print("SKIP")
+-    raise SystemExit
+-
+-
+-class S(io.IOBase):
+-    def write(self, buf):
+-        assert len(buf) >= 0
+-        return 2
+-
+-    def ioctl(self, cmd, arg):
+-        return 0
+-
+-    def readinto(self, buf):
+-        assert len(buf) >= 0
+-        return 3
+-
+-
+-try:
+-    print("abc", file=S())
+-    print("write OK")
+-except OSError as e:
+-    print("write failed, errno", e.errno)
+-
+-buf = bytearray(1)
+-try:
+-    json.load(S())
+-    print("readinto OK")
+-except OSError as e:
+-    print("read failed, errno", e.errno)
+diff --git a/tests/micropython/io_badlength.py.exp b/tests/micropython/io_badlength.py.exp
+deleted file mode 100644
+index bba660dd3..000000000
+--- a/tests/micropython/io_badlength.py.exp
++++ /dev/null
+@@ -1,2 +0,0 @@
+-write failed, errno 5
+-read failed, errno 5
+diff --git a/tests/misc/cexample_subclass.py b/tests/misc/cexample_subclass.py
+index 6857788e5..9f52a2c73 100644
+--- a/tests/misc/cexample_subclass.py
++++ b/tests/misc/cexample_subclass.py
+@@ -2,7 +2,6 @@
+ 
+ try:
+     from cexample import AdvancedTimer
+-    import time  # used to skip this test on minimal unix variant
+ except ImportError:
+     print("SKIP")
+     raise SystemExit
+diff --git a/tests/multi_wlan/getaddrinfo.py b/tests/multi_wlan/getaddrinfo.py
+index 8ad6155ed..6b95c7e6f 100644
+--- a/tests/multi_wlan/getaddrinfo.py
++++ b/tests/multi_wlan/getaddrinfo.py
+@@ -20,11 +20,8 @@ def instance0():
+ 
+     multitest.next()
+ 
+-    # Note: Lookup domain for this test doesn't need to exist, as the board
+-    # isn't internet connected. It also shouldn't exist, so a cached result is
+-    # never returned!
+     try:
+-        socket.getaddrinfo("doesnotexist.example.com", 80)
++        socket.getaddrinfo("micropython.org", 80)
+     except OSError as er:
+         print(
+             "active(0) failed"
+@@ -33,7 +30,7 @@ def instance0():
+     wlan.active(1)
+ 
+     try:
+-        socket.getaddrinfo("doesnotexist.example.com", 80)
++        socket.getaddrinfo("micropython.org", 80)
+     except OSError as er:
+         print(
+             "active(1) failed", er.errno in (-2, -202)
+diff --git a/tests/ports/qemu/romfs_test.py b/tests/ports/qemu/romfs_test.py
+deleted file mode 100644
+index dce847d84..000000000
+--- a/tests/ports/qemu/romfs_test.py
++++ /dev/null
+@@ -1,55 +0,0 @@
+-try:
+-    import binascii, os
+-
+-    binascii.crc32
+-    os.listdir
+-except (ImportError, AttributeError):
+-    print("SKIP")
+-    raise SystemExit
+-
+-TEST_FILES = [
+-    "0x30d83fe5.bin",
+-    "0x37bef0eb.bin",
+-    "0x442f3b5f.bin",
+-    "0x648793fb.bin",
+-    "0x913837b6.bin",
+-    "0xdb14aac7.bin",
+-]
+-
+-
+-def is_test_partition():
+-    # Make sure a ROMFS partition exists first and that it is the one used for
+-    # CI tests, otherwise skip the test.
+-
+-    try:
+-        romfs_files = sorted(os.listdir("/rom"))
+-    except OSError as e:
+-        if "ENODEV" in str(e):
+-            return False, None
+-        raise OSError(e)
+-
+-    # os.path.exists isn't available so we have to be a bit more creative.
+-    if "romfs_sentinel.txt" not in romfs_files:
+-        return False, None
+-
+-    try:
+-        with open("/rom/romfs_sentinel.txt", "rt") as s:
+-            data = s.read(128)
+-            return data.startswith("*MPY-ROMFS-TEST-PARTITION*\n"), romfs_files
+-    except OSError as e:
+-        if "ENOENT" in str(e):
+-            return False, None
+-        raise OSError(e)
+-
+-
+-valid_partition, romfs_files = is_test_partition()
+-if not valid_partition:
+-    print("SKIP")
+-    raise SystemExit
+-
+-# The last entry is the CI romfs partition tag.
+-
+-print(TEST_FILES == romfs_files[:-1])
+-for f in TEST_FILES:
+-    with open("/rom/" + f, "rb") as h:
+-        print(hex(binascii.crc32(h.read())) == f[:-4])
+diff --git a/tests/ports/qemu/romfs_test.py.exp b/tests/ports/qemu/romfs_test.py.exp
+deleted file mode 100644
+index 672e08f95..000000000
+--- a/tests/ports/qemu/romfs_test.py.exp
++++ /dev/null
+@@ -1,7 +0,0 @@
+-True
+-True
+-True
+-True
+-True
+-True
+-True
+diff --git a/tests/run-tests.py b/tests/run-tests.py
+index c5c5dc740..153424f65 100755
+--- a/tests/run-tests.py
++++ b/tests/run-tests.py
+@@ -178,7 +178,6 @@ platform_tests_to_skip = {
+         "extmod/binascii_a2b_base64.py",
+         "extmod/deflate_compress_memory_error.py",  # tries to allocate unlimited memory
+         "extmod/re_stack_overflow.py",
+-        "extmod/re_stack_overflow2.py",
+         "extmod/time_res.py",
+         "extmod/vfs_posix.py",
+         "extmod/vfs_posix_enoent.py",
+@@ -874,7 +873,7 @@ def run_tests(pyb, tests, args, result_dir, num_threads=1):
+     def run_one_test(test_file):
+         test_file_abspath = os.path.abspath(test_file).replace("\\", "/")
+         # If test_file is one of our own tests always make it relative to our tests/ dir and
+-        # otherwise use the absolute path, regardless of actual path passed,
++        # otherwise use the abosulte path, irregardless of actual path passed,
+         # such that display and result output is always the same.
+         try:
+             test_file_relpath = os.path.relpath(test_file, start=base_path())
+diff --git a/tools/ci.sh b/tools/ci.sh
+index 81006ea4e..056f6a610 100755
+--- a/tools/ci.sh
++++ b/tools/ci.sh
+@@ -158,7 +158,7 @@ function ci_mpy_format_setup {
+ 
+ function ci_mpy_format_test {
+     # Test mpy-tool.py dump feature on bytecode
+-    python3 ./tools/mpy-tool.py -xd tests/assets/frozentest.mpy
++    python3 ./tools/mpy-tool.py -xd tests/frozen/frozentest.mpy
+ 
+     # Build MicroPython
+     ci_unix_standard_build
+@@ -167,7 +167,7 @@ function ci_mpy_format_test {
+     export MICROPYPATH=.
+ 
+     # Test mpy-tool.py running under MicroPython
+-    $micropython ./tools/mpy-tool.py -x -d tests/assets/frozentest.mpy
++    $micropython ./tools/mpy-tool.py -x -d tests/frozen/frozentest.mpy
+ 
+     # Test mpy-tool.py dump feature on native code
+     make -C examples/natmod/features1
+@@ -287,7 +287,7 @@ function ci_esp8266_build {
+     make ${MAKEOPTS} -C ports/esp8266 submodules
+     make ${MAKEOPTS} -C ports/esp8266 BOARD=ESP8266_GENERIC
+     make ${MAKEOPTS} -C ports/esp8266 BOARD=ESP8266_GENERIC BOARD_VARIANT=FLASH_512K
+-    make ${MAKEOPTS} -C ports/esp8266 BOARD=ESP8266_GENERIC BOARD_VARIANT=FLASH_1M USER_C_MODULES=../../examples/usercmodule
++    make ${MAKEOPTS} -C ports/esp8266 BOARD=ESP8266_GENERIC BOARD_VARIANT=FLASH_1M
+ 
+     # Test building native .mpy with xtensa architecture.
+     ci_native_mpy_modules_build xtensa
+@@ -324,7 +324,7 @@ function ci_mimxrt_build {
+     make ${MAKEOPTS} -C ports/mimxrt BOARD=MIMXRT1020_EVK submodules
+     make ${MAKEOPTS} -C ports/mimxrt BOARD=MIMXRT1020_EVK
+     make ${MAKEOPTS} -C ports/mimxrt BOARD=TEENSY40 submodules
+-    make ${MAKEOPTS} -C ports/mimxrt BOARD=TEENSY40 USER_C_MODULES=../../examples/usercmodule
++    make ${MAKEOPTS} -C ports/mimxrt BOARD=TEENSY40
+     make ${MAKEOPTS} -C ports/mimxrt BOARD=MIMXRT1060_EVK submodules
+     make ${MAKEOPTS} -C ports/mimxrt BOARD=MIMXRT1060_EVK CFLAGS_EXTRA=-DMICROPY_HW_USB_MSC=1
+ }
+@@ -341,7 +341,7 @@ function ci_nrf_build {
+     make ${MAKEOPTS} -C mpy-cross
+     make ${MAKEOPTS} -C ports/nrf submodules
+     make ${MAKEOPTS} -C ports/nrf BOARD=PCA10040
+-    make ${MAKEOPTS} -C ports/nrf BOARD=MICROBIT USER_C_MODULES=../../examples/usercmodule
++    make ${MAKEOPTS} -C ports/nrf BOARD=MICROBIT
+     make ${MAKEOPTS} -C ports/nrf BOARD=PCA10056 SD=s140
+     make ${MAKEOPTS} -C ports/nrf BOARD=PCA10090
+ }
+@@ -462,7 +462,7 @@ function ci_renesas_ra_board_build {
+     make ${MAKEOPTS} -C mpy-cross
+     make ${MAKEOPTS} -C ports/renesas-ra submodules
+     make ${MAKEOPTS} -C ports/renesas-ra BOARD=RA4M1_CLICKER
+-    make ${MAKEOPTS} -C ports/renesas-ra BOARD=EK_RA6M2 USER_C_MODULES=../../examples/usercmodule
++    make ${MAKEOPTS} -C ports/renesas-ra BOARD=EK_RA6M2
+     make ${MAKEOPTS} -C ports/renesas-ra BOARD=EK_RA6M1
+     make ${MAKEOPTS} -C ports/renesas-ra BOARD=EK_RA4M1
+     make ${MAKEOPTS} -C ports/renesas-ra BOARD=EK_RA4W1
+@@ -729,7 +729,6 @@ function ci_unix_coverage_setup {
+ }
+ 
+ function ci_unix_coverage_build {
+-    # note: the coverage variant incorporates ../../examples/usercmodule, set in mpconfigvariant.mk
+     ci_unix_build_helper VARIANT=coverage
+     ci_unix_build_ffi_lib_helper gcc
+ }
+@@ -988,13 +987,13 @@ function ci_unix_repr_b_run_tests {
+ 
+ function ci_windows_setup {
+     sudo apt-get update
+-    sudo apt-get install gcc-mingw-w64 g++-mingw-w64
++    sudo apt-get install gcc-mingw-w64
+ }
+ 
+ function ci_windows_build {
+     make ${MAKEOPTS} -C mpy-cross
+     make ${MAKEOPTS} -C ports/windows submodules
+-    make ${MAKEOPTS} -C ports/windows CROSS_COMPILE=i686-w64-mingw32- USER_C_MODULES=../../examples/usercmodule
++    make ${MAKEOPTS} -C ports/windows CROSS_COMPILE=i686-w64-mingw32-
+     make ${MAKEOPTS} -C ports/windows CROSS_COMPILE=x86_64-w64-mingw32- BUILD=build-standard-w64
+ }
+ 
