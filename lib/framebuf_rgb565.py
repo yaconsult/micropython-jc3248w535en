@@ -23,7 +23,20 @@ import framebuf
 
 
 class _Palette(framebuf.FrameBuffer):
-    """2-pixel RGB565 palette used by writer.py for color glyph blitting."""
+    """2-pixel RGB565 palette used by CWriter for colour glyph blitting.
+
+    framebuf.blit() maps source pixel values to palette indices:
+      pixel value 0 → palette pixel(0, 0) → background colour
+      pixel value 1 → palette pixel(1, 0) → foreground colour
+
+    In MONO_HLSB font bitmaps: 0 = background, 1 = ink (foreground).
+
+    CWriter calls palette.bg(bgcolor) and palette.fg(fgcolor) before each
+    blit, so bg must write pixel(0,0) and fg must write pixel(1,0).
+
+    NOTE: Use CWriter (not Writer) for colour displays.
+    Writer.setcolor() ignores its arguments entirely — it is for monochrome.
+    """
     def __init__(self):
         # Pre-initialize with black/white to ensure valid buffer state
         self._buf = bytearray([0x00, 0x00, 0xff, 0xff])  # black, white

@@ -196,7 +196,52 @@ CONFIG_ESP_PANEL_DRIVERS_FILE_SKIP=n
 CONFIG_ESP_UTILS_CONF_FILE_SKIP=n
 ```
 
-### 7. Board header macro syntax
+### 7. board.begin() must only be called once per hard boot
+
+Calling `board.begin()` more than once corrupts the display — it re-runs the
+vendor init sequence including a display-off command, leaving a blank screen.
+This happens on MicroPython soft resets which re-import `main.py`.
+
+Fix: **C++ static guard** in `mpy_support/esp_panel_mp_board.cpp`:
+```cpp
+static std::weak_ptr<Board> g_board_instance;  // persist Board across soft resets
+static bool g_board_began = false;             // only begin() once per hard boot
+```
+`make_new` reuses the existing `Board` object if `weak_ptr` is still live.
+`board_begin` checks `g_board_began` and skips if already done.
+Static C++ variables survive MicroPython soft resets (C heap, not MP heap).
+
+### 8. Use CWriter, not Writer, for colour displays
+
+`writer.py` (from `micropython-font-to-py`) has two classes:
+
+| Class | For | `setcolor()` |
+|-------|-----|-------------|
+| `Writer` | Monochrome only | **Ignores arguments** — always renders 0/1 |
+| `CWriter` | Colour RGB565 | Correctly sets fg/bg palette colours |
+
+`Writer.setcolor(d.YELLOW, d.BLACK)` silently does nothing. Always use `CWriter`:
+
+```python
+from writer import CWriter   # NOT Writer
+wri = CWriter(d.fb, font, verbose=False)
+CWriter.set_textpos(d.fb, row, col)
+wri.setcolor(d.YELLOW, d.BLACK)
+wri.printstring('Hello!')
+```
+
+### 9. ESP32-S3 QSPI/DMA conflict with font data in flash
+
+Reading font glyph data via `memoryview` directly from flash while LCD DMA
+is active can cause a hard fault — the CPU and LCD DMA share the QSPI bus.
+
+Fix in `CWriter._printchar()`:
+```python
+buf = bytearray(self.glyph)  # copy from flash into RAM before blit
+fbc = framebuf.FrameBuffer(buf, self.char_width, self.char_height, self.map)
+```
+
+### 10. Board header macro syntax
 
 `ESP_PANEL_BOARD_LCD_VENDOR_INIT_CMD()` is expanded as:
 ```c
@@ -217,7 +262,7 @@ included inside the macro**.
 | `src/board/supported/jingcai/BOARD_JC3248W535EN.h` | QSPI clock → 20 MHz; added full vendor init sequence; touch pins SCL=8 SDA=4 |
 | `esp_panel_board_supported_conf.h` | Enabled `BOARD_JC3248W535EN` |
 | `CMakeLists.txt` | Added `.` to `INCLUDE_DIRS` so conf headers are found |
-| `mpy_support/esp_panel_mp_board.cpp` | Added `draw_bitmap`, `get_width`, `get_height`, `read_touch` methods |
+| `mpy_support/esp_panel_mp_board.cpp` | Added `draw_bitmap`, `get_width`, `get_height`, `read_touch`; added `g_board_instance` weak_ptr + `g_board_began` static flag (lesson 7) |
 
 ### `micropython/` repo
 
@@ -238,11 +283,22 @@ MicroPython's build system.
 
 ## What remains to be done
 
-- [ ] **Backlight control** — PWM via LEDC on the backlight GPIO (check vendor schematic for pin)
-- [ ] **Remove `mp_printf` debug** — left in `draw_bitmap` temporarily; clean before release
-- [ ] **Expose `draw_bitmap` chunk size** — make it configurable or auto-detect max DMA size
 - [ ] **Multi-touch test** — `read_touch` supports up to 5 points; only single touch verified
-- [ ] **Framebuffer helper** — a Python-level `FrameBuffer`-compatible class using PSRAM
-- [ ] **main.py auto-init** — write a clean `main.py` to init display on boot
 - [ ] **Upstream contributions** — submit board header fixes and mpy_support additions back to ESP32_Display_Panel
 - [ ] **Test at 40 MHz with direct IOMUX** — if QSPI pins can be routed via IOMUX (bypassing GPIO matrix), 40 MHz may work
+
+## What is done
+
+- [x] Vendor LCD init sequence (lesson 1)
+- [x] QSPI clock at 20 MHz (lesson 2)
+- [x] `draw_bitmap` chunked DMA (lesson 3)
+- [x] RGB565 byte order (lesson 4)
+- [x] Touch I2C ownership (lesson 5)
+- [x] Kconfig FILE_SKIP overrides (lesson 6)
+- [x] `board.begin()` idempotent across soft resets — C++ static guard (lesson 7)
+- [x] Custom fonts via `CWriter` (lesson 8)
+- [x] QSPI/DMA flash conflict fix — glyph RAM copy (lesson 9)
+- [x] Backlight PWM (`lib/backlight.py`)
+- [x] RGB565 framebuffer in PSRAM (`lib/framebuf_rgb565.py`)
+- [x] `main.py` auto-init with font splash screen
+- [x] `Display` high-level wrapper (`lib/display.py`)

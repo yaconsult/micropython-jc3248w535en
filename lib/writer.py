@@ -283,7 +283,11 @@ class CWriter(Writer):
         self._get_char(char, recurse)
         if self.glyph is None:
             return  # All done
-        buf = bytearray(self.glyph)  # copy to RAM (avoids flash/QSPI DMA conflict)
+        buf = bytearray(self.glyph)  # ESP32-S3: copy glyph from flash to RAM — font data lives in a
+        # bytes literal in the .py module, accessed as a memoryview from flash.
+        # Reading it directly during LCD DMA can hard-fault because both the CPU
+        # and the LCD controller share the QSPI bus. Copying to a bytearray puts
+        # it in PSRAM where it is safe to read while DMA is active.
         fbc = framebuf.FrameBuffer(buf, self.char_width, self.char_height, self.map)
         palette = self.device.palette
         palette.bg(self.fgcolor if invert else self.bgcolor)

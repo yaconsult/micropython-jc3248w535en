@@ -60,20 +60,34 @@ python -m esptool --chip esp32s3 --port /dev/ttyACM0 -b 460800 \
 
 ### 4. Use
 
+On boot, `main.py` automatically initialises the display and shows a font splash screen.
+
 ```python
-from esp_panel import Board
+from display import Display
+from writer import CWriter          # CWriter for colour displays — NOT Writer
+import fonts.sans24 as sans24
+import fonts.sans16 as sans16
 
-b = Board()
-b.init()
-b.begin()
+d = Display(brightness=80)          # init board, backlight, framebuffer
 
-# Solid blue screen
-buf = bytearray([0x00, 0x1F] * (320 * 480))
-b.draw_bitmap(0, 0, 320, 480, buf)
+# Draw with built-in font
+d.fb.fill(d.BLACK)
+d.text('Hello', 10, 10, d.WHITE)
+d.show()
+
+# Draw with custom bitmap fonts (CWriter)
+wri = CWriter(d.fb, sans24, verbose=False)
+CWriter.set_textpos(d.fb, 50, 10)
+wri.setcolor(d.YELLOW, d.BLACK)
+wri.printstring('Hello!')
+d.show()
 
 # Touch
-points = b.read_touch()   # [(x, y, strength)] or []
+points = d.touch()   # [(x, y, strength)] or []
 ```
+
+> **Important:** Always use `CWriter` (not `Writer`) for colour displays.
+> `Writer.setcolor()` silently ignores its arguments — it is for monochrome only.
 
 See **[MICROPYTHON_JC3248W535EN.md](MICROPYTHON_JC3248W535EN.md)** for the
 full API reference, RGB565 colour table, and all lessons learned.
@@ -86,13 +100,16 @@ full API reference, RGB565 colour table, and all lessons learned.
 - ✅ `draw_bitmap` — full and partial frame updates, correct RGB565 colours
 - ✅ `read_touch` — X/Y coordinates via I2C AXS15231B touch controller
 - ✅ `color_bar_test`, `get_width`, `get_height`
+- ✅ Backlight PWM control (`lib/backlight.py`)
+- ✅ RGB565 framebuffer in PSRAM (`lib/framebuf_rgb565.py`)
+- ✅ Custom bitmap fonts via `CWriter` (`lib/writer.py` + `lib/fonts/`)
+- ✅ `board.begin()` idempotent across soft resets (C++ static guard)
 
 ## What remains
 
-- ⬜ Backlight PWM control
-- ⬜ Python-level framebuffer helper (using PSRAM)
 - ⬜ Multi-touch verification (API supports up to 5 points)
 - ⬜ Test 40 MHz QSPI if pins can bypass GPIO matrix via IOMUX
+- ⬜ Upstream contributions to ESP32_Display_Panel
 
 ---
 
