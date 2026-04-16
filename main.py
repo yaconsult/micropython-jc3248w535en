@@ -10,14 +10,23 @@ The `d` object is then available in the REPL.
 """
 
 from display import Display
-from writer import Writer
+from writer import CWriter
+import fonts.sans16 as sans16
 import fonts.sans24 as sans24
 
 d = Display(brightness=80)
 
-d.fb.fill(d.RED)
-wri24 = Writer(d.fb, sans24, verbose=False)
-Writer.set_textpos(d.fb, 50, 20)
-wri24.setcolor(d.GREEN, d.RED)
-wri24.printstring('Hi')
+d.fb.fill(d.BLACK)
+wri16 = CWriter(d.fb, sans16, verbose=False)
+wri24 = CWriter(d.fb, sans24, verbose=False)
+
+CWriter.set_textpos(d.fb, 10, 10)
+wri24.setcolor(d.YELLOW, d.BLACK)
+wri24.printstring('JC3248W535EN')
+
+CWriter.set_textpos(d.fb, 50, 10)
+wri16.setcolor(d.color(180, 220, 255), d.BLACK)
+wri16.printstring('MicroPython Ready')
+
 d.show()
+print('Display ready.')
