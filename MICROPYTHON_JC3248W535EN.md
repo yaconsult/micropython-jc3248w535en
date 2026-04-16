@@ -291,7 +291,9 @@ MicroPython's build system.
 ## What remains to be done
 
 - [x] **Multi-touch test** — `readPoints(5)` is called in C++ but the AXS15231B IC on this board only ever returns 1 point; hardware-limited to single touch
-- [ ] **Upstream contributions** — submit board header fixes and mpy_support additions back to ESP32_Display_Panel
+- [x] **Upstream contributions** — PRs submitted to esp-arduino-libs/ESP32_Display_Panel:
+  - [#266 — board: add JC3248W535EN board header](https://github.com/esp-arduino-libs/ESP32_Display_Panel/pull/266)
+  - [#267 — mpy_support: draw_bitmap, read_touch, soft-reset guard](https://github.com/esp-arduino-libs/ESP32_Display_Panel/pull/267)
 - [x] **Test at 40 MHz** — works (GPIO matrix is stable at ≤40 MHz on ESP32-S3); no fps gain vs 20 MHz; CPU is bottleneck
 
 ## What is done
