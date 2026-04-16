@@ -145,15 +145,22 @@ The fix: `BOARD_JC3248W535EN.h` now defines
 the vendor's official Arduino demo (`esp_bsp.c`). This must end with
 `0x2C` (RAMWR) — not `0x29` (DISPLAY_ON).
 
-### 2. QSPI clock must be 20 MHz
+### 2. QSPI clock: 20 MHz chosen, 40 MHz also works
 
-40 MHz (the library default) causes visible pixel noise because the QSPI
-signals pass through the ESP32-S3's GPIO matrix which introduces propagation
-delay. 20 MHz is stable.
+The QSPI pins on this board are routed through the ESP32-S3 GPIO matrix (not
+IOMUX — the IOMUX pins for SPI2 are GPIO 9/10/11/12/13/14, none of which are
+used here). Per the ESP-IDF docs, the GPIO matrix is stable at 40 MHz and
+below on ESP32-S3.
 
-Set in `BOARD_JC3248W535EN.h`:
+**40 MHz was tested and works correctly** with no pixel noise. However it
+provides **no measurable fps improvement** — 100 full-frame flushes at both
+20 MHz and 40 MHz take ~17 000 ms (~5.9 fps). The bottleneck is CPU time in
+the chunked `draw_bitmap` loop, not bus bandwidth.
+
+20 MHz is kept as the default for margin. Change to 40 MHz in
+`BOARD_JC3248W535EN.h` if needed:
 ```c
-#define ESP_PANEL_BOARD_LCD_QSPI_CLK_HZ  (20 * 1000 * 1000)
+#define ESP_PANEL_BOARD_LCD_QSPI_CLK_HZ  (40 * 1000 * 1000)  // safe, but no fps gain
 ```
 
 ### 3. draw_bitmap must send in chunks
@@ -283,9 +290,9 @@ MicroPython's build system.
 
 ## What remains to be done
 
-- [ ] **Multi-touch test** — `read_touch` supports up to 5 points; only single touch verified
+- [x] **Multi-touch test** — `readPoints(5)` is called in C++ but the AXS15231B IC on this board only ever returns 1 point; hardware-limited to single touch
 - [ ] **Upstream contributions** — submit board header fixes and mpy_support additions back to ESP32_Display_Panel
-- [ ] **Test at 40 MHz with direct IOMUX** — if QSPI pins can be routed via IOMUX (bypassing GPIO matrix), 40 MHz may work
+- [x] **Test at 40 MHz** — works (GPIO matrix is stable at ≤40 MHz on ESP32-S3); no fps gain vs 20 MHz; CPU is bottleneck
 
 ## What is done
 
