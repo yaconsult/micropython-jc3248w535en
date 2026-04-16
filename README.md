@@ -89,6 +89,9 @@ points = d.touch()   # [(x, y, strength)] or []
 > **Important:** Always use `CWriter` (not `Writer`) for colour displays.
 > `Writer.setcolor()` silently ignores its arguments — it is for monochrome only.
 
+See **[BUILD_GUIDE.md](BUILD_GUIDE.md)** for detailed build, flash, and
+deployment instructions.
+
 See **[MICROPYTHON_JC3248W535EN.md](MICROPYTHON_JC3248W535EN.md)** for the
 full API reference, RGB565 colour table, and all lessons learned.
 
