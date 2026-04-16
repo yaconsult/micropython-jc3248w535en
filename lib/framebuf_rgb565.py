@@ -25,7 +25,8 @@ import framebuf
 class _Palette(framebuf.FrameBuffer):
     """2-pixel RGB565 palette used by writer.py for color glyph blitting."""
     def __init__(self):
-        self._buf = bytearray(4)
+        # Pre-initialize with black/white to ensure valid buffer state
+        self._buf = bytearray([0x00, 0x00, 0xff, 0xff])  # black, white
         super().__init__(self._buf, 2, 1, framebuf.RGB565)
 
     def fg(self, color):
